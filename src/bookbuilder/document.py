@@ -154,7 +154,7 @@ def analyze_document(project: Project, store=None, progress: Callable[[str], Non
     say("Unindo parágrafos que continuam na página seguinte…")
     continuations(pages, vocab, rep)
     unify_boxes(pages)
-    cleanup.toc_entries(pages)
+    cleanup.toc_entries(pages, lex if lex is not None else fusion.Lexicon(vocab, fusion.load_dictionary()))
 
     for p in pages:
         if p.mean_conf and p.mean_conf < 75 or any("baixa_confianca" in b.flags for b in p.blocks if b.role in FLOW_ROLES):

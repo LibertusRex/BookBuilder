@@ -614,6 +614,7 @@ def write(project: Project, store, out_path: str) -> DocxResult:
     section_start_pages: list[tuple[object, int]] = [(sec, 0)]
     figures_dir = Path(store.figures_dir) if store is not None else None
     after_cover = False
+    breaks = _scan_breaks(pages)
     for pi, p in enumerate(pages):
         sig = heads[pi].signature() + "||" + foots[pi].signature()
         if opts.docx_page_breaks and pi > 0:
@@ -654,7 +655,7 @@ def write(project: Project, store, out_path: str) -> DocxResult:
                 _add_runs(par, b.runs, notes, note_texts, highlight)
                 _direct_font(par, b, project, mapping)
                 res.paragraphs += 1
-            if par is not None and ((first_on_page and cur_par_page_break) or after_cover):
+            if par is not None and ((first_on_page and cur_par_page_break) or after_cover or b.id in breaks):
                 par.paragraph_format.page_break_before = True
                 after_cover = False
             if COVER in b.flags and par is not None:
@@ -689,6 +690,27 @@ def write(project: Project, store, out_path: str) -> DocxResult:
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
     doc.save(out_path)
     return res
+
+
+def _scan_breaks(pages: list[Page]) -> set[str]:
+    """Livro digitalizado: o sumário e cada capítulo começam em página nova
+    (o título do sumário, o primeiro título depois dele e os títulos de
+    nível 1). Devolve os ids dos blocos que levam a quebra antes."""
+    out: set[str] = set()
+    seq = [b for p in pages if p.light for b in p.ordered_blocks()
+           if not b.role.is_running and b.role not in (Role.FOOTNOTE, Role.ARTIFACT)]
+    if not seq:
+        return out
+    toc = [k for k, b in enumerate(seq) if TOC in b.flags]
+    if toc:
+        k0 = toc[0]
+        if k0 > 0 and seq[k0 - 1].role == Role.TITLE:
+            out.add(seq[k0 - 1].id)
+        nxt = next((b for b in seq[toc[-1] + 1:] if b.role == Role.TITLE), None)
+        if nxt is not None:
+            out.add(nxt.id)
+    out |= {b.id for b in seq[1:] if b.role == Role.TITLE and b.heading_level == 1}
+    return out
 
 
 def _core_properties(doc, project: Project) -> None:

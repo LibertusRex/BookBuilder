@@ -99,7 +99,7 @@ def _split_toc(p: Page) -> None:
     p.blocks = out
 
 
-def toc_entries(pages: list[Page]) -> None:
+def toc_entries(pages: list[Page], lex=None) -> None:
     """Entradas de sumário: título, tabulação e número da página, todas no
     mesmo formato (o parágrafo leva a tabulação com pontilhado à direita).
     O pontilhado lido pelo OCR sai do texto; palavras do título que só o
@@ -120,6 +120,9 @@ def toc_entries(pages: list[Page]) -> None:
                 if tw and sw[:len(tw)] == tw and 0 < len(sw) - len(tw) <= 3:
                     title = re.sub(r"\s+", " ", s_parsed[0]).strip()
             low = {t.strip() for r in b.runs if r.low_conf for t in r.text.split()}
+            if lex is not None:
+                # Palavra válida colada ao pontilhado ("FRENTE.....-0enssra") herdou a confiança do lixo.
+                low = {t for t in low if not (t.isalpha() and len(t) >= 3 and lex.valid(t))}
             entries.append((b, title, page, low))
         nums = [_toc_number(t) for _, t, _, _ in entries]
         for k, (b, title, page, low) in enumerate(entries):

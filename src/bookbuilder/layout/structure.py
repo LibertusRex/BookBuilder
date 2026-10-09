@@ -4,6 +4,7 @@ quadros que atravessam páginas."""
 
 from __future__ import annotations
 
+import dataclasses
 import re
 import statistics
 from collections import Counter
@@ -314,18 +315,40 @@ def continuations(pages: list[Page], vocab: Counter, rep: DocReport) -> None:
         first_offset = b.indent_left + (b.indent_first if len(b.lines) > 1 else 0.0)
         indented = first_offset > xh * 1.2
         open_end = hyphen or not text.ends_sentence(at)
-        if not open_end or (indented and not strong) or text.BULLET_START.match(bt):
+        broken_dash = hyphen and bt[:1] in "–—"  # "felicida-" | "— primeiro…": o fim da palavra se perdeu
+        if not open_end or (indented and not strong) or (text.BULLET_START.match(bt) and not broken_dash):
             continue
         if not (hyphen or bt[:1].islower() or bt[:1] in ",;)–—" or not text.ends_sentence(at)):
             continue
         b.continues_prev = True
         rep.continuations += 1
+        if broken_dash:
+            # A palavra partida não termina na página seguinte (o resto ficou
+            # fora da foto): fica como está, em destaque para a revisão.
+            _flag_last_word(a)
+            continue
         if hyphen:
             left = at.split()[-1][:-1]
             right = bt.split()[0]
             if not text.keep_hyphen(left, right, vocab):
                 _drop_trailing_hyphen(a)
             b.flags.append("juntar_sem_espaco")
+
+
+def _flag_last_word(b: Block) -> None:
+    for k in range(len(b.runs) - 1, -1, -1):
+        r = b.runs[k]
+        t = r.text.rstrip()
+        if not t:
+            continue
+        cut = t.rfind(" ") + 1
+        if cut > 0:
+            b.runs[k:k + 1] = [dataclasses.replace(r, text=t[:cut]), dataclasses.replace(r, text=t[cut:], low_conf=True)]
+        else:
+            r.low_conf = True
+        if "palavra_incompleta" not in b.flags:
+            b.flags.append("palavra_incompleta")
+        return
 
 
 def _drop_trailing_hyphen(b: Block) -> None:

@@ -306,3 +306,39 @@ def test_rodape_em_letra_pequena(tmp_path):
     assert d.styles["Footer"].font.size.pt == 5.0
     par = d.sections[0].footer.paragraphs[0]
     assert par.style.name == "Footer" and "Tal" in par.text
+
+
+def test_palavra_partida_entre_paginas_fica_em_amarelo():
+    from bookbuilder.document import DocReport
+    from bookbuilder.layout.structure import continuations
+
+    def blk(bid, txt):
+        ln = Line(bbox=(150, 300, 1350, 340), xheight=20.0, words=[_w(t, 150, 200) for t in txt.split()])
+        return Block(id=bid, role=Role.BODY, bbox=(150, 300, 1350, 600), lines=[ln], runs=[Run(txt)])
+
+    a = blk("a", "Por outro lado, a busca indireta da felicida-")
+    b = blk("b", "— primeiro decompondo-a em seus elementos")
+    pages = [Page(source=imageio.SourceRef(path="x.pdf", frame=i), blocks=[x]) for i, x in enumerate((a, b))]
+    continuations(pages, __import__("collections").Counter(), DocReport())
+    assert b.continues_prev and "juntar_sem_espaco" not in b.flags
+    assert a.text == "Por outro lado, a busca indireta da felicida-"  # nada inventado
+    assert [r.text for r in a.runs if r.low_conf] == ["felicida-"]
+
+
+def test_quebras_de_pagina_no_livro_digitalizado():
+    from bookbuilder.export.docx_writer import _scan_breaks
+
+    def blk(bid, role, level=0, flags=()):
+        return Block(id=bid, role=role, bbox=(0, 0, 10, 10), heading_level=level, flags=list(flags))
+
+    p1 = Page(source=imageio.SourceRef(path="x.pdf"), light={"scale": 1.0},
+              blocks=[blk("rosto", Role.BODY), blk("sum", Role.TITLE, 4),
+                      blk("e1", Role.BODY, flags=[cleanup.TOC]), blk("e2", Role.BODY, flags=[cleanup.TOC])])
+    p2 = Page(source=imageio.SourceRef(path="x.pdf", frame=1), light={"scale": 1.0},
+              blocks=[blk("intro", Role.TITLE, 1), blk("t", Role.BODY), blk("cap2", Role.TITLE, 1),
+                      blk("secao", Role.TITLE, 3)])
+    for i, b in enumerate(p1.blocks + p2.blocks):
+        b.order = i
+    assert _scan_breaks([p1, p2]) == {"sum", "intro", "cap2"}
+    p1.light = p2.light = None  # capturas de tela: sem quebras novas
+    assert _scan_breaks([p1, p2]) == set()
