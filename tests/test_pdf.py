@@ -342,3 +342,20 @@ def test_quebras_de_pagina_no_livro_digitalizado():
     assert _scan_breaks([p1, p2]) == {"sum", "intro", "cap2"}
     p1.light = p2.light = None  # capturas de tela: sem quebras novas
     assert _scan_breaks([p1, p2]) == set()
+
+
+def test_entrada_de_sumario_nao_continua_na_pagina_seguinte():
+    from collections import Counter
+
+    from bookbuilder.document import DocReport
+    from bookbuilder.layout.structure import continuations
+
+    def blk(bid, txt, flags=()):
+        ln = Line(bbox=(150, 300, 1350, 340), xheight=20.0, words=[_w(t, 150, 200) for t in txt.split()])
+        return Block(id=bid, role=Role.BODY, bbox=(150, 300, 1350, 600), lines=[ln], runs=[Run(txt)], flags=list(flags))
+
+    a = blk("a", "AGRADECIMENTOS\t197", [cleanup.TOC])
+    b = blk("b", "ainda mais benéfica quando estamos em baixa")
+    pages = [Page(source=imageio.SourceRef(path="x.pdf", frame=i), blocks=[x]) for i, x in enumerate((a, b))]
+    continuations(pages, Counter(), DocReport())
+    assert not b.continues_prev

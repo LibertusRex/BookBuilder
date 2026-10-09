@@ -297,8 +297,8 @@ def continuations(pages: list[Page], vocab: Counter, rep: DocReport) -> None:
         b.continues_prev = False
         if "juntar_sem_espaco" in b.flags:
             b.flags.remove("juntar_sem_espaco")
-        if a.role not in FLOW_ROLES or b.role not in FLOW_ROLES:
-            continue
+        if a.role not in FLOW_ROLES or b.role not in FLOW_ROLES or "entrada_sumario" in a.flags + b.flags:
+            continue  # entrada de sumário termina no número da página
         at, bt = a.text.rstrip(), b.text.lstrip()
         if not at or not bt:
             continue
