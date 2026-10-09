@@ -23,7 +23,7 @@ from typing import Callable
 from rapidfuzz import fuzz
 
 from .layout import cleanup, fusion, noise, notes, running, text, titles
-from .layout.structure import (FLOW_ROLES, continuations, merge_split_paragraphs, recompute_alignment,
+from .layout.structure import (FLOW_ROLES, continuations, even_body_paragraphs, merge_split_paragraphs, recompute_alignment,
                                style_alignment, unify_boxes)
 from .model import Block, Page, PageStatus, Project, Role
 from .ocr import hybrid
@@ -72,9 +72,11 @@ def analyze_document(project: Project, store=None, progress: Callable[[str], Non
     say("Procurando páginas repetidas…")
     _duplicates(done, rep)
     pages = flow_pages(project)
+    noise.cover_page(pages, (lambda p: _save_cover(store, p)) if store is not None else None)
 
     say("Identificando cabeçalhos, rodapés e números de página…")
     rr = running.classify(pages)
+    running.numbers_in_margins(pages)
     rep.running_notes = rr.notes
     project.analysis["page_number_pattern"] = rr.page_number_pattern
     project.analysis["page_number_pos"] = rr.page_number_pos
@@ -151,6 +153,8 @@ def analyze_document(project: Project, store=None, progress: Callable[[str], Non
     say("Unindo parágrafos que continuam na página seguinte…")
     continuations(pages, vocab, rep)
     unify_boxes(pages)
+    cleanup.toc_entries(pages)
+    even_body_paragraphs(pages)
 
     for p in pages:
         if p.mean_conf and p.mean_conf < 75 or any("baixa_confianca" in b.flags for b in p.blocks if b.role in FLOW_ROLES):
@@ -219,6 +223,30 @@ def _save_crop(store, p: Page, box) -> str:
     name = f"{p.uid[:8]}-{x0}-{y0}.png"
     os.makedirs(store.figures_dir, exist_ok=True)
     ok, buf = cv2.imencode(".png", cv2.cvtColor(crop, cv2.COLOR_RGB2BGR))
+    if not ok:
+        return ""
+    with open(os.path.join(store.figures_dir, name), "wb") as f:
+        f.write(buf.tobytes())
+    return name
+
+
+def _save_cover(store, p: Page) -> str:
+    """Capa: a página inteira, nas cores originais (sem a correção de luz)."""
+    import os
+
+    import cv2
+    import numpy as np
+
+    from . import imageio
+
+    rgb = np.asarray(imageio.load_rgb(p.source))
+    h, w = rgb.shape[:2]
+    if max(h, w) > 2400:
+        f = 2400 / max(h, w)
+        rgb = cv2.resize(rgb, (round(w * f), round(h * f)), interpolation=cv2.INTER_AREA)
+    name = f"{p.uid[:8]}-capa.jpg"
+    os.makedirs(store.figures_dir, exist_ok=True)
+    ok, buf = cv2.imencode(".jpg", cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR), [cv2.IMWRITE_JPEG_QUALITY, 90])
     if not ok:
         return ""
     with open(os.path.join(store.figures_dir, name), "wb") as f:

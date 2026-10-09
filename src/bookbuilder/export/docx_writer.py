@@ -25,7 +25,7 @@ from pathlib import Path
 from docx import Document
 from docx.enum.section import WD_SECTION
 from docx.enum.style import WD_STYLE_TYPE
-from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_BREAK, WD_COLOR_INDEX
+from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_BREAK, WD_COLOR_INDEX, WD_TAB_ALIGNMENT, WD_TAB_LEADER
 from docx.opc.constants import RELATIONSHIP_TYPE as RT
 from docx.opc.packuri import PackURI
 from docx.opc.part import Part
@@ -34,10 +34,14 @@ from docx.oxml.ns import qn
 from docx.shared import Emu, Pt
 
 from ..document import flow_pages
+from ..layout.cleanup import TOC
+from ..layout.noise import COVER
 from ..layout.structure import FLOW_ROLES, box_group
 from ..layout.running import normalize
 from ..model import Block, Page, Project, Role, Run, Style
 from ..typography import fonts
+
+TOC_STYLE = "Sumário"
 
 ALIGN = {
     "left": WD_ALIGN_PARAGRAPH.LEFT,
@@ -201,12 +205,32 @@ def _setup_styles(doc, project: Project, pages: list[Page], geo: _Geometry) -> d
     q.paragraph_format.right_indent = Pt(6)
     _get_or_add_style(doc, "Quote")
     _get_or_add_style(doc, "Caption")
+    # Sumário do livro: todas as entradas no mesmo formato, número da página
+    # na margem direita com pontilhado.
+    toc = _get_or_add_style(doc, TOC_STYLE)
+    _style_font(toc, body)
+    toc.font.bold = False
+    toc.font.italic = False
+    tpf = toc.paragraph_format
+    tpf.first_line_indent = Pt(0)
+    tpf.left_indent = Pt(0)
+    tpf.space_before = Pt(0)
+    tpf.space_after = Pt(max(2.0, (body.size if body else 11) * 0.3))
+    tpf.alignment = WD_ALIGN_PARAGRAPH.LEFT
+    tpf.tab_stops.add_tab_stop(Pt(geo.text_width), WD_TAB_ALIGNMENT.RIGHT, WD_TAB_LEADER.DOTS)
     fn = _get_or_add_style(doc, "Footnote Text")
     fst = _dominant([b for b in all_blocks if b.role == Role.FOOTNOTE], styles)
     if fst:
         _style_font(fn, fst)
     else:
         fn.font.size = Pt(max(7.0, (body.size if body else 11) * 0.8))
+    # Cabeçalho e rodapé: tabulações central e à direita na largura do texto
+    # desta página (as do Word são da folha Carta).
+    for name in ("Header", "Footer"):
+        ts = doc.styles[name].paragraph_format.tab_stops
+        ts.clear_all()
+        ts.add_tab_stop(Pt(geo.text_width / 2), WD_TAB_ALIGNMENT.CENTER)
+        ts.add_tab_stop(Pt(geo.text_width), WD_TAB_ALIGNMENT.RIGHT)
     fr = _get_or_add_style(doc, "Footnote Reference", kind=WD_STYLE_TYPE.CHARACTER, base=None)
     fr.font.superscript = True
     return mapping
@@ -421,7 +445,15 @@ class _Margin:
 
 def _margin_of(p: Page, blocks: list[Block], notes: list[str]) -> _Margin:
     items = []
+    # Linha a linha (blocos que se sobrepõem na vertical), da esquerda para a direita.
+    rows: list[list[Block]] = []
     for b in sorted(blocks, key=lambda b: (b.bbox[1], b.bbox[0])):
+        row = rows[-1] if rows else None
+        if row and min(b.bbox[3], max(x.bbox[3] for x in row)) - max(b.bbox[1], min(x.bbox[1] for x in row)) > 0:
+            row.append(b)
+        else:
+            rows.append([b])
+    for b in [b for row in rows for b in sorted(row, key=lambda b: b.bbox[0])]:
         if b.surya_html and b.runs:
             text = " ".join("".join(r.text for r in b.runs).split())  # leitura fundida Tesseract × Surya
         else:
@@ -484,7 +516,7 @@ def _tab_stops(par) -> None:
 
     section_width = None
     try:
-        sec = par.part.document.sections[0]
+        sec = par.part.package.main_document_part.document.sections[0]  # parágrafo de cabeçalho/rodapé
         section_width = sec.page_width - sec.left_margin - sec.right_margin
     except Exception:  # noqa: BLE001
         pass
@@ -565,6 +597,7 @@ def write(project: Project, store, out_path: str) -> DocxResult:
     sections_sig: str | None = None
     section_start_pages: list[tuple[object, int]] = [(sec, 0)]
     figures_dir = Path(store.figures_dir) if store is not None else None
+    after_cover = False
     for pi, p in enumerate(pages):
         sig = heads[pi].signature() + "||" + foots[pi].signature()
         if opts.docx_page_breaks and pi > 0:
@@ -605,8 +638,11 @@ def write(project: Project, store, out_path: str) -> DocxResult:
                 _add_runs(par, b.runs, notes, note_texts, highlight)
                 _direct_font(par, b, project, mapping)
                 res.paragraphs += 1
-            if par is not None and first_on_page and cur_par_page_break:
+            if par is not None and ((first_on_page and cur_par_page_break) or after_cover):
                 par.paragraph_format.page_break_before = True
+                after_cover = False
+            if COVER in b.flags and par is not None:
+                after_cover = True  # a capa fica sozinha na primeira página
             first_on_page = False
             cur_par = par if b.role in FLOW_ROLES else None
             if b.role in FLOW_ROLES:
@@ -666,6 +702,12 @@ def _page_setup(sec, geo: _Geometry) -> None:
 
 def _format_paragraph(par, b: Block, mapping: dict[str, str], geo: _Geometry, group: str | None, project: Project) -> None:
     doc_styles = par.part.document.styles
+    if TOC in b.flags and any("\t" in r.text for r in b.runs):
+        par.style = doc_styles[TOC_STYLE]
+        extra = b.space_before - geo.normal_gap
+        if extra > geo.ppp * 8:  # separação entre grupos de entradas
+            par.paragraph_format.space_before = Pt(round(min(18.0, geo.pt(extra)), 1))
+        return
     if b.role == Role.TITLE and b.heading_level:
         par.style = doc_styles[f"Heading {min(6, b.heading_level)}"]
         if group:
@@ -708,7 +750,7 @@ def _direct_font(par, b: Block, project: Project, mapping: dict[str, str]) -> No
     (ex.: um título de nível 2 numa fonte diferente dos demais) recebe a
     fonte e o tamanho do seu estilo como formatação direta."""
     st = project.styles.get(b.style_id or "")
-    if st is None:
+    if st is None or (par.style is not None and par.style.name == TOC_STYLE):
         return
     word_style = par.style.name if par.style is not None else ""
     if mapping.get(st.id) == word_style:
@@ -735,7 +777,11 @@ def _add_figure(container, b: Block, figures_dir: Path | None, geo: _Geometry, r
         return None
     par = container.add_paragraph()
     par.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    width_pt = min(geo.text_width, geo.pt(b.bbox[2] - b.bbox[0]))
+    w, h = b.bbox[2] - b.bbox[0], b.bbox[3] - b.bbox[1]
+    width_pt = min(geo.text_width, geo.pt(w))
+    max_h = geo.page_h - geo.margin_t - geo.margin_b - 12  # cabe na página (capa)
+    if h > 0 and width_pt * h / w > max_h:
+        width_pt = max_h * w / h
     par.add_run().add_picture(str(path), width=Pt(width_pt))
     res.images += 1
     return par
@@ -813,12 +859,13 @@ def _apply_margins(doc, sec, heads: list[_Margin], foots: list[_Margin], pages: 
     else:
         _fill_margin(sec.header, h_main)
         _fill_margin(sec.footer, f_main)
-    if first_differs and len(pages) > 1:
+    cover = any(COVER in b.flags for b in pages[0].blocks)  # capa: sem cabeçalho nem rodapé
+    if (first_differs or cover) and len(pages) > 1:
         sec.different_first_page_header_footer = True
         sec.first_page_header.is_linked_to_previous = False
         sec.first_page_footer.is_linked_to_previous = False
-        _fill_margin(sec.first_page_header, first_h)
-        _fill_margin(sec.first_page_footer, first_f)
+        _fill_margin(sec.first_page_header, None if cover else first_h)
+        _fill_margin(sec.first_page_footer, None if cover else first_f)
     if not continuous and pages[0].printed_number and pages[0].printed_number.isdigit():
         pg = OxmlElement("w:pgNumType")
         pg.set(qn("w:start"), pages[0].printed_number)

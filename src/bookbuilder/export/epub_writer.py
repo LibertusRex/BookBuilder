@@ -23,6 +23,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..document import flow_pages
+from ..layout.cleanup import TOC
+from ..layout.noise import COVER
 from ..layout.structure import FLOW_ROLES, box_group
 from ..model import Block, Project, Role, Run, Style
 
@@ -128,6 +130,7 @@ def _css(project: Project, styles: dict[str, Style]) -> str:
         "p.esquerda { text-align: left; } p.centro { text-align: center; text-indent: 0; } p.direita { text-align: right; text-indent: 0; }",
         "p.item { text-indent: -1.2em; margin-left: 1.2em; }",
         "p.espaco { margin-top: 0.8em; }",
+        "p.sumario { text-indent: 0; text-align: left; margin: 0.25em 0; }",
         "blockquote { margin: 0.6em 1.5em; font-size: 0.95em; } blockquote p { text-indent: 0; }",
         "div.quadro { border: 1px solid #888; border-radius: 4px; padding: 0.5em 0.8em; margin: 0.8em 0; }",
         "div.quadro p { text-indent: 0; }",
@@ -212,6 +215,9 @@ def write(project: Project, store, out_path: str) -> EpubResult:
     images: dict[str, str] = {}  # nome no EPUB → caminho de origem
     ref_ids: set[str] = set()
     hid = 0
+    cover_src = ""
+    heads: list[tuple[str, str]] = []  # (texto do título, destino), para o sumário do livro
+    toc_pars: list[tuple[_Chapter, int, str, str]] = []
     open_par: dict | None = None  # parágrafo em construção (para continuações)
     open_box: str | None = None
 
@@ -266,10 +272,14 @@ def write(project: Project, store, out_path: str) -> EpubResult:
                 anchor = f"t{hid}"
                 ch().parts.append(f'<h{lvl} id="{anchor}">{text_html}</h{lvl}>')
                 _toc_add(toc, _Toc(lvl, plain or f"Seção {hid}", f"{ch().file}#{anchor}"))
+                heads.append((plain, f"{ch().file}#{anchor}"))
                 continue
             if b.role == Role.FIGURE:
                 src = figures_dir / b.image_file if (figures_dir and b.image_file) else None
                 if src is None or not src.is_file():
+                    continue
+                if COVER in b.flags:  # capa fotografada: vira a capa do EPUB
+                    cover_src = cover_src or str(src)
                     continue
                 name = f"imagens/{b.image_file}"
                 images[name] = str(src)
@@ -279,6 +289,15 @@ def write(project: Project, store, out_path: str) -> EpubResult:
                 continue
             if b.role == Role.TABLE:
                 ch().parts.append(_table_html(b, figures_dir, images, res))
+                continue
+            if TOC in b.flags and "\t" in b.text:
+                # Sumário do livro impresso: sem o número da página (no EPUB o
+                # leitor pagina conforme a letra); a entrada leva ao capítulo.
+                cut = next(i for i, r in enumerate(b.runs) if "\t" in r.text)
+                entry = b.runs[:cut] + [Run(b.runs[cut].text.split("\t", 1)[0])]
+                toc_pars.append((ch(), len(ch().parts), _runs_html(entry, notes_map, opts.epub_mark_low_conf, ref_ids),
+                                 "".join(r.text for r in entry)))
+                ch().parts.append("")
                 continue
             text_html = _runs_html(b.runs, notes_map, opts.epub_mark_low_conf, ref_ids)
             if not text_html.strip():
@@ -324,10 +343,14 @@ def write(project: Project, store, out_path: str) -> EpubResult:
             add_note_aside(key)
             res.footnotes += 1
     close_box()
+    for c, k, entry_html, entry in toc_pars:
+        href = _toc_target(entry, heads)
+        c.parts[k] = (f'<p class="sumario"><a href="{href}">{entry_html}</a></p>' if href
+                      else f'<p class="sumario">{entry_html}</p>')
 
     res.chapters = len(chapters)
     res.toc_entries = _count(toc)
-    _package(out_path, project, chapters, toc, images, _css(project, styles), lang, title)
+    _package(out_path, project, chapters, toc, images, _css(project, styles), lang, title, cover_src)
     res.notes.append("Leitores de EPUB podem substituir a fonte e o tamanho definidos; a paginação é a do leitor.")
     return res
 
@@ -348,6 +371,22 @@ def _table_html(b: Block, figures_dir, images: dict[str, str], res: EpubResult) 
         grid[c.row][c.col] = esc(c.text)
     body = "".join("<tr>" + "".join(f"<td>{cell}</td>" for cell in row) + "</tr>" for row in grid)
     return f"<table>{body}</table>"
+
+
+def _toc_target(entry: str, heads: list[tuple[str, str]]) -> str | None:
+    """Título do livro a que leva a entrada do sumário: todas as palavras da
+    entrada (sem o número de ordem) estão no título, e ele não tem muito mais."""
+    def words(t: str) -> list[str]:
+        return [w for w in re.sub(r"[^\w-]+", " ", t).casefold().split() if w]
+
+    ew = words(re.sub(r"^\s*\d{1,3}\.\s+", "", entry))
+    if not ew:
+        return None
+    for head, href in heads:
+        hw = words(head)
+        if all(w in hw for w in ew) and len(hw) <= len(ew) + 3:
+            return href
+    return None
 
 
 def _toc_add(toc: list[_Toc], item: _Toc) -> None:
@@ -381,7 +420,7 @@ def _ncx_points(items: list[_Toc], counter: list[int]) -> str:
 
 
 def _package(out_path: str, project: Project, chapters: list[_Chapter], toc: list[_Toc], images: dict[str, str],
-             css: str, lang: str, title: str) -> None:
+             css: str, lang: str, title: str, cover_src: str = "") -> None:
     opts = project.export
     ident = project.analysis.get("epub_id") or f"urn:uuid:{uuid.uuid4()}"
     project.analysis["epub_id"] = ident
@@ -392,8 +431,9 @@ def _package(out_path: str, project: Project, chapters: list[_Chapter], toc: lis
     spine = []
     cover_xhtml = None
     cover_name = None
-    if opts.cover_image and Path(opts.cover_image).is_file():
-        ext = Path(opts.cover_image).suffix.lower()
+    cover_file = opts.cover_image if opts.cover_image and Path(opts.cover_image).is_file() else cover_src
+    if cover_file:
+        ext = Path(cover_file).suffix.lower()
         cover_name = f"imagens/capa{ext}"
         mt = mimetypes.guess_type(cover_name)[0] or "image/jpeg"
         manifest.append(f'<item id="capa-img" href="{cover_name}" media-type="{mt}" properties="cover-image"/>')
@@ -450,7 +490,7 @@ def _package(out_path: str, project: Project, chapters: list[_Chapter], toc: lis
         z.writestr("OEBPS/estilo.css", css, compress_type=zipfile.ZIP_DEFLATED)
         if cover_xhtml and cover_name:
             z.writestr("OEBPS/capa.xhtml", cover_xhtml, compress_type=zipfile.ZIP_DEFLATED)
-            z.write(opts.cover_image, f"OEBPS/{cover_name}", compress_type=zipfile.ZIP_DEFLATED)
+            z.write(cover_file, f"OEBPS/{cover_name}", compress_type=zipfile.ZIP_DEFLATED)
         for c in chapters:
             body = "\n".join(c.parts)
             if c.notes:

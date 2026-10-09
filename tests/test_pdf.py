@@ -15,7 +15,7 @@ from rapidfuzz import fuzz
 from bookbuilder import imageio, paths
 from bookbuilder import project as projmod
 from bookbuilder.layout import cleanup, noise
-from bookbuilder.model import Block, Line, Page, PageStatus, Role, Settings, Word
+from bookbuilder.model import Block, Line, Page, PageStatus, Role, Run, Settings, Word
 from bookbuilder.ocr import preprocess
 from bookbuilder.pipeline import PageJob, apply_light, process_page
 
@@ -169,3 +169,84 @@ def test_capitular_volta_para_a_palavra():
     noise.attach_initials(p)
     assert first.text == "Mas" and body.surya_html == "<p>Mas o que</p>"
     assert cap.role == Role.ARTIFACT and not cap.lines
+
+
+def _entry(bid, words, y):
+    ln = Line(bbox=(0, y, 1400, y + 40), words=[_w(t, x0, x1, y=y + 40) for t, x0, x1 in words])
+    return Block(id=bid, role=Role.BODY, bbox=ln.bbox, lines=[ln])
+
+
+def test_sumario_uma_entrada_por_paragrafo_com_numero_a_direita():
+    blocks = [_entry("a", [("l.", 0, 30), ("Bem-estar", 40, 200), ("espiritual", 210, 360), ("........", 370, 1300),
+                           ("35", 1350, 1390)], 100),
+              _entry("b", [("2.", 0, 30), ("Bem-estar", 40, 200), ("físico", 210, 300), ("........", 310, 1300),
+                           ("65", 1350, 1390)], 160),
+              _entry("c", [("3.", 0, 30), ("Bem-estar", 40, 200), ("intelectual", 210, 360), ("........", 370, 1300),
+                           ("95", 1350, 1390)], 220),
+              _entry("d", [("4.º", 0, 30), ("Bem-estar", 40, 200), ("relacional", 210, 360), ("........", 370, 1300),
+                           ("123", 1340, 1390)], 280)]
+    intro = _entry("i", [("INTRODUÇÃO:", 0, 200), ("FELIZ", 210, 300), ("........", 310, 1300), ("9", 1370, 1390)], 20)
+    intro.surya_html = "<p>INTRODUÇÃO: FELIZ, ACONTECER.....9</p>"
+    p = Page(source=imageio.SourceRef(path="x.pdf"), blocks=[intro] + blocks)
+    cleanup.dot_leaders([p])
+    assert all(cleanup.TOC in b.flags for b in p.blocks)
+    for b in p.blocks:
+        b.runs = [r for ln in b.lines for r in [Run(ln.text)]]
+    cleanup.toc_entries([p])
+    assert [b.text for b in p.ordered_blocks()] == [
+        "INTRODUÇÃO: FELIZ, ACONTECER\t9", "1. Bem-estar espiritual\t35", "2. Bem-estar físico\t65",
+        "3. Bem-estar intelectual\t95", "4. Bem-estar relacional\t123"]
+
+
+def test_capa_fotografada_vira_imagem_inteira():
+    title = Block(id="t", role=Role.TITLE, bbox=(100, 100, 1500, 400),
+                  lines=[Line(bbox=(100, 100, 1500, 400), words=[_w("Seja", 100, 600, h=200, y=400)])])
+    art = Block(id="f", role=Role.FIGURE, bbox=(500, 800, 1300, 1800))
+    cover = Page(source=imageio.SourceRef(path="x.pdf"), blocks=[title, art], width=1800, height=2800,
+                 light={"scale": 1.0, "xh": 50})
+    inner = Page(source=imageio.SourceRef(path="x.pdf", frame=1), blocks=[_entry("b", [("texto", 0, 100)], 100)],
+                 width=1800, height=2800, light={"scale": 1.0, "xh": 20})
+    got = noise.cover_page([cover, inner], lambda p: "capa.jpg")
+    assert got is not None and got.image_file == "capa.jpg" and got.bbox == (0, 0, 1800, 2800)
+    assert [b.role for b in cover.blocks if b is not got] == [Role.ARTIFACT, Role.ARTIFACT]
+    assert noise.cover_page([cover, inner]) is got  # nova análise: a mesma capa
+    assert noise.cover_page([inner]) is None  # página de texto comum não é capa
+
+
+def test_numero_grudado_no_rodape_vira_numero_de_pagina():
+    from bookbuilder.layout import running
+
+    def page(i, blocks, num=None):
+        return Page(source=imageio.SourceRef(path="x.pdf", frame=i), blocks=blocks, printed_number=num)
+
+    foot = Block(id="f", role=Role.FOOTER, bbox=(100, 2700, 600, 2740), lines=[Line(bbox=(100, 2700, 600, 2740), words=[
+        _w("12", 100, 140, y=2740), _w("Tal", 160, 220, y=2740), _w("Ben-Shahar", 230, 600, y=2740)])])
+    pages = [page(0, [], "10"), page(1, [], "11"), page(2, [foot])]
+    assert running.numbers_in_margins(pages) == 1
+    assert foot.lines[0].text == "Tal Ben-Shahar" and foot.bbox[0] == 160
+    num = next(b for b in pages[2].blocks if b.role == Role.PAGE_NUMBER)
+    assert num.text == "" and num.lines[0].text == "12" and pages[2].printed_number == "12"
+    # Número que não é o da sequência (ano, edição) fica no texto.
+    foot2 = Block(id="g", role=Role.FOOTER, bbox=(0, 0, 1, 1), lines=[Line(bbox=(0, 0, 1, 1), words=[
+        _w("Edição", 0, 100), _w("2020", 110, 200)])])
+    assert running.numbers_in_margins([page(0, [], "10"), page(1, [foot2])]) == 0
+
+
+def test_paragrafos_do_corpo_justificados_com_recuo_igual():
+    from bookbuilder.layout.structure import even_body_paragraphs
+
+    def par(bid, first, left, right, align="justify", n=4):
+        lines = [Line(bbox=(0, k * 40, 1400, k * 40 + 30), xheight=20.0) for k in range(n)]
+        return Block(id=bid, role=Role.BODY, bbox=(0, 0, 1400, n * 40), lines=lines, align=align,
+                     indent_first=first, indent_left=left, indent_right=right)
+
+    bs = [par("a", 112, 5, 0), par("b", 121, 7, 34, "left"), par("c", 3, 0, 60), par("d", 98, 26, 0),
+          par("epigrafe", -3, 212, 1, n=2), par("assinatura", 0, 1000, 0, "right", n=1)]
+    p = Page(source=imageio.SourceRef(path="x.pdf"), blocks=bs, light={"scale": 1.0})
+    assert even_body_paragraphs([p]) == 4
+    assert [(b.align, b.indent_first, b.indent_left, b.indent_right) for b in bs[:4]] == [
+        ("justify", 112, 0, 0), ("justify", 112, 0, 0), ("justify", 0, 0, 0), ("justify", 112, 0, 0)]
+    assert bs[4].indent_left == 212 and bs[5].align == "right"
+    p.light = None  # capturas de tela: recuos medidos com precisão, ficam como estão
+    bs[1].indent_first = 121
+    assert even_body_paragraphs([p]) == 0

@@ -177,7 +177,8 @@ def merge_split_paragraphs(pages: list[Page]) -> int:
         while i < len(blocks) - 1:
             a, b = blocks[i], blocks[i + 1]
             if (a.role in FLOW_ROLES and b.role in FLOW_ROLES and not a.user_edited and not b.user_edited
-                    and a.column == b.column and a.box_id == b.box_id and a.lines and b.lines):
+                    and a.column == b.column and a.box_id == b.box_id and a.lines and b.lines
+                    and "entrada_sumario" not in a.flags + b.flags):  # sumário: uma entrada por parágrafo
                 at = " ".join(ln.text for ln in a.lines).rstrip()
                 bt = " ".join(ln.text for ln in b.lines).lstrip()
                 xh = statistics.median([ln.xheight for ln in a.lines + b.lines if ln.xheight] or [10.0])
@@ -356,3 +357,33 @@ def unify_boxes(pages: list[Page]) -> None:
                 b.box_id = raw
             prev_raw = raw
             prev_id = b.box_id.split("=")[-1]
+
+
+def even_body_paragraphs(pages: list[Page]) -> int:
+    """Páginas fotografadas: a curvatura e a perspectiva da foto deixam o
+    recuo e as margens de cada parágrafo um pouco diferentes (e alguns
+    parecem alinhados à esquerda). Os parágrafos do corpo do texto ficam
+    todos justificados, sem recuo lateral e com o mesmo recuo de primeira
+    linha (o do livro, ou nenhum). Blocos realmente recuados (epígrafe,
+    citação), centralizados ou curtos ficam como estão. Retorna os ajustados."""
+    # Páginas de texto corrido (folha de rosto, sumário e créditos ficam de fora).
+    scanned = [p for p in pages if p.light and any(b.role == Role.BODY and len(b.lines) >= 3 for b in p.blocks)]
+    cands = [b for p in scanned for b in p.blocks
+             if b.role == Role.BODY and b.lines and not b.user_edited and not b.box_id
+             and "entrada_sumario" not in b.flags and b.align not in ("center", "right")]
+    xhs = [ln.xheight for b in cands for ln in b.lines if ln.xheight]
+    if not cands or not xhs:
+        return 0
+    xh = statistics.median(xhs)
+    firsts = [b.indent_first for b in cands if b.indent_first > xh * 2]
+    common = statistics.median(firsts) if firsts else 0.0
+    n = 0
+    for b in cands:
+        if b.indent_left > max(common, xh * 3) * 1.5:
+            continue  # bloco recuado de verdade
+        b.align = "justify"
+        b.indent_left = 0.0
+        b.indent_right = 0.0
+        b.indent_first = common if (common and b.indent_first > common * 0.5) else 0.0
+        n += 1
+    return n

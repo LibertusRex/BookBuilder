@@ -5,12 +5,13 @@ from __future__ import annotations
 import re
 from collections import Counter
 
-from ..model import Block, Page, Role
+from ..model import Block, Page, Role, Run, merge_runs
 from . import fixes, fusion
 from .structure import FLOW_ROLES, MARGIN_ROLES
 
 LEADER = "." * 8
 PAGE_REF = re.compile(r"^[0-9]{1,4}$|^[ivxlcdm]{1,6}$", re.I)
+TOC = "entrada_sumario"
 
 
 def dot_leaders(pages: list[Page]) -> int:
@@ -29,6 +30,11 @@ def dot_leaders(pages: list[Page]) -> int:
                 if _leader_line(ln):
                     n += 1
         _split_toc(p)
+        for b in p.blocks:
+            ws = b.lines[-1].words if b.lines else []
+            if (len(ws) >= 2 and ws[-2].text == LEADER and PAGE_REF.match(ws[-1].text)
+                    and b.role in FLOW_ROLES + (Role.TITLE,) and TOC not in b.flags):
+                b.flags.append(TOC)
     return n
 
 
@@ -91,6 +97,75 @@ def _split_toc(p: Page) -> None:
                 group = []
                 k += 1
     p.blocks = out
+
+
+def toc_entries(pages: list[Page]) -> None:
+    """Entradas de sumário: título, tabulação e número da página, todas no
+    mesmo formato (o parágrafo leva a tabulação com pontilhado à direita).
+    O pontilhado lido pelo OCR sai do texto; palavras do título que só o
+    Surya leu antes do pontilhado voltam; o número de ordem lido errado
+    ("l.", "4.º") segue a sequência das entradas vizinhas."""
+    for p in pages:
+        entries = []
+        for b in p.ordered_blocks():
+            if TOC not in b.flags or b.user_edited or not b.runs:
+                continue
+            parsed = _toc_split("".join(r.text for r in b.runs if not r.note_ref))
+            if parsed is None:
+                continue
+            title, page = parsed
+            s_parsed = _toc_split(fusion.html_to_text(b.surya_html)) if b.surya_html else None
+            if s_parsed and s_parsed[1] == page:
+                tw, sw = _toc_words(title), _toc_words(s_parsed[0])
+                if tw and sw[:len(tw)] == tw and 0 < len(sw) - len(tw) <= 3:
+                    title = re.sub(r"\s+", " ", s_parsed[0]).strip()
+            low = {t.strip() for r in b.runs if r.low_conf for t in r.text.split()}
+            entries.append((b, title, page, low))
+        nums = [_toc_number(t) for _, t, _, _ in entries]
+        for k, (b, title, page, low) in enumerate(entries):
+            first = title.split(" ", 1)
+            if nums[k] is not None and len(first) == 2:
+                prev = next((nums[j] for j in range(k - 1, -1, -1) if nums[j] and nums[j][0] is not None), None)
+                nxt = next((nums[j] for j in range(k + 1, len(nums)) if nums[j] and nums[j][0] is not None), None)
+                want = prev[0] + 1 if prev else (nxt[0] - 1 if nxt else None)
+                if want and want > 0 and first[0] != f"{want}." and (nums[k][0] is None or nums[k][1]):
+                    low.discard(first[0])
+                    title = f"{want}. {first[1]}"
+            runs = [Run(t + " ", low_conf=t in low) for t in title.split(" ")]
+            runs[-1].text = runs[-1].text.rstrip()
+            b.runs = merge_runs(runs + [Run("\t"), Run(page)])
+            b.disputes = [d for d in b.disputes if d.get("current", "").strip() in title]
+            b.continues_prev = False
+
+
+def _toc_split(t: str) -> tuple[str, str] | None:
+    """Texto de uma entrada → (título sem o pontilhado, número da página)."""
+    t = re.sub(r"\s+", " ", t).strip()
+    m = re.match(r"^(.*?)[\s.…·_]*(?<=[\s.…·_])([0-9]{1,4}|[ivxlcdm]{1,6})$", t, re.I)
+    if not m:
+        return None
+    title = m.group(1).rstrip(" .…·_") if re.search(r"\.{2,}\s*$", m.group(1)) else m.group(1).strip()
+    return (title, m.group(2)) if title else None
+
+
+def _toc_words(t: str) -> list[str]:
+    return [w for w in (re.sub(r"\W+", "", x).casefold() for x in t.split()) if w]
+
+
+def _toc_number(title: str) -> tuple[int | None, bool] | None:
+    """Número de ordem no começo da entrada ("3.") → (valor, lido errado?).
+    "l." e "I." (algarismo 1 lido como letra) e "4.º" contam como lidos
+    errado; o valor certo vem da sequência."""
+    tok = title.split(" ", 1)[0]
+    m = re.fullmatch(r"(\d{1,3})\.", tok)
+    if m:
+        return int(m.group(1)), False
+    m = re.fullmatch(r"(\d{1,3})\.?[º°ª]", tok)
+    if m:
+        return int(m.group(1)), True
+    if re.fullmatch(r"[lI|]\.", tok):
+        return None, True
+    return None
 
 
 def drop_repeated_tails(pages: list[Page]) -> None:

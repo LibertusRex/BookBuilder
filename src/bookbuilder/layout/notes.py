@@ -31,6 +31,10 @@ def detect_footnotes(pages: list[Page], body_xh: float) -> None:
         if not flow:
             continue
         for b in p.blocks:
+            if "entrada_sumario" in b.flags and not b.role_locked:
+                if b.role == Role.FOOTNOTE:
+                    b.role = Role.BODY  # análise anterior
+                continue  # "5. Bem-estar emocional …… 153" no pé do sumário não é nota
             if b.role_locked or b.role not in (Role.BODY, Role.FOOTER):
                 continue
             if b.role == Role.FOOTER and "verificar_margem" not in b.flags:

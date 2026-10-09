@@ -305,3 +305,41 @@ def figures_from_garbage(pages: list[Page], save_crop) -> int:
             if o.box_id in frames and "na_figura" not in o.flags and not o.role_locked:
                 o.box_id = None
     return n
+
+
+COVER = "capa"
+
+
+def cover_page(pages: list[Page], save_image=None) -> Block | None:
+    """Capa fotografada (primeira página de um PDF digitalizado ou foto, com
+    figura grande ou letras bem maiores que as do livro): fica inteira como
+    imagem, com as cores originais, e o texto lido nela sai do documento.
+    ``save_image(page)`` grava a imagem e devolve o nome do arquivo."""
+    import statistics
+
+    if not pages or not pages[0].light:
+        return None
+    p = pages[0]
+    cover = next((b for b in p.blocks if COVER in b.flags), None)
+    if cover is None:
+        if any(b.user_edited or b.role_locked for b in p.blocks):
+            return None
+        area = float(p.width * p.height) or 1.0
+        big_fig = any(b.role == Role.FIGURE and (b.bbox[2] - b.bbox[0]) * (b.bbox[3] - b.bbox[1]) >= area * 0.05
+                      for b in p.blocks)
+        xs = [ln.xheight for b in p.blocks if b.role in (Role.BODY, Role.TITLE) for ln in b.lines if ln.xheight]
+        rest = [ln.xheight for q in pages[1:] for b in q.blocks if b.role == Role.BODY for ln in b.lines if ln.xheight]
+        big_text = bool(xs and rest and statistics.median(xs) >= statistics.median(rest) * 1.6)
+        if not (big_fig or big_text):
+            return None
+        cover = Block(id=f"{p.uid[:8]}-capa", role=Role.FIGURE, bbox=(0, 0, p.width, p.height), kind="capa",
+                      flags=[COVER])
+        p.blocks.append(cover)
+    for b in p.blocks:
+        if b is not cover and b.role != Role.ARTIFACT:
+            b.role = Role.ARTIFACT
+            if "na_capa" not in b.flags:
+                b.flags.append("na_capa")
+    if save_image is not None:
+        cover.image_file = save_image(p) or cover.image_file
+    return cover

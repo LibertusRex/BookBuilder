@@ -288,3 +288,46 @@ def _set(b: Block, role: Role, res: RunningResult) -> None:
 def _body_xheight(pages: list[Page]) -> float:
     vals = [ln.xheight for p in pages[:200] for b in p.blocks if b.role == Role.BODY for ln in b.lines if ln.xheight]
     return statistics.median(vals) if vals else 0.0
+
+
+def numbers_in_margins(pages: list[Page]) -> int:
+    """Rodapé/cabeçalho repetido com o número da página grudado no mesmo
+    bloco ("12 Tal Ben-Shahar"): quando o número no começo ou no fim é o que
+    a sequência das páginas vizinhas espera, ele vira um bloco de número de
+    página (campo automático na exportação) e o texto fixo fica sozinho.
+    Retorna os números separados."""
+    import dataclasses
+
+    known = [(i, int(p.printed_number)) for i, p in enumerate(pages) if p.printed_number and p.printed_number.isdigit()]
+    if not known:
+        return 0
+    n = 0
+    for i, p in enumerate(pages):
+        if any(b.role == Role.PAGE_NUMBER for b in p.blocks):
+            continue
+        near = min(known, key=lambda k: abs(k[0] - i))
+        if abs(near[0] - i) > 4:
+            continue
+        want = near[1] + (i - near[0])
+        for b in list(p.blocks):
+            if b.role not in (Role.FOOTER, Role.HEADER) or b.role_locked or b.user_edited or not b.lines:
+                continue
+            for ln, k in ((b.lines[0], 0), (b.lines[-1], -1)):
+                if len(ln.words) < 2 or ln.words[k].text != str(want):
+                    continue
+                w = ln.words[k]
+                rest = ln.words[1:] if k == 0 else ln.words[:-1]
+                b.lines[b.lines.index(ln)] = dataclasses.replace(
+                    ln, words=rest, bbox=(min(x.bbox[0] for x in rest), ln.bbox[1], max(x.bbox[2] for x in rest), ln.bbox[3]))
+                b.bbox = (min(x.bbox[0] for x in b.lines), b.bbox[1], max(x.bbox[2] for x in b.lines), b.bbox[3])
+                b.surya_html = ""  # a leitura do Surya trazia o número junto
+                num = Block(id=f"{b.id}-num", role=Role.PAGE_NUMBER, bbox=w.bbox,
+                            lines=[dataclasses.replace(ln, words=[w], bbox=w.bbox)], order=b.order)
+                p.blocks.append(num)
+                p.printed_number = str(want)
+                n += 1
+                break
+            else:
+                continue
+            break
+    return n
