@@ -210,7 +210,9 @@ def final_text_fixes(pages: list[Page], vocab: Counter, lex) -> None:
     * inciso "I" lido como "l"/"1"/"|", "(inciso), I)" → "(inciso I)";
     * "§ 1.%" → "§ 1.º", "155,$ 2" → "155, § 2", vírgula colada;
     * acento que falta numa palavra que o livro escreve acentuada
-      ("vitima" → "vítima", "impeto" → "ímpeto")."""
+      ("vitima" → "vítima", "impeto" → "ímpeto");
+    * palavra partida com maiúscula no meio da frase ("im Portante" →
+      "importante"), quando o pedaço da frente não é palavra e a junção é."""
     amap = fixes.accent_map(vocab)
 
     def fix(t: str) -> str:
@@ -218,6 +220,7 @@ def final_text_fixes(pages: list[Page], vocab: Counter, lex) -> None:
         t = fixes.fix_text(t)
         t = fixes.restore_accents(t, amap, lex)
         t = fixes.fix_icon_prefix(t, lex)
+        t = _join_split_word(t, lex)
         return re.sub(r"(^|(?<=\s))–(?=\s|$|[,;.)])", "—", t)
 
     for p in pages:
@@ -236,6 +239,21 @@ def final_text_fixes(pages: list[Page], vocab: Counter, lex) -> None:
                 b.disputes = [d for d in b.disputes if d.get("current", "").strip() not in cleared]
                 if not any(r.low_conf for r in b.runs) and "baixa_confianca" in b.flags:
                     b.flags.remove("baixa_confianca")
+
+
+# Pedaço minúsculo + pedaço com maiúscula, no meio da frase (não depois de ponto).
+SPLIT_WORD = re.compile(r"(?<![.!?…:]\s)(?<=\s)([a-zà-ÿ]{1,4}) ([A-ZÀ-Ü][a-zà-ÿ]{2,})\b")
+
+
+def _join_split_word(t: str, lex) -> str:
+    def rep(m):
+        a, b = m.group(1), m.group(2)
+        joined = a + b.lower()
+        if not lex.valid(a) and lex.valid(joined):
+            return joined
+        return m.group(0)
+
+    return SPLIT_WORD.sub(rep, t)
 
 
 def apply_to_runs(b: Block, fn) -> None:
@@ -287,6 +305,10 @@ def fix_words(pages: list[Page], vocab: Counter) -> tuple[int, int]:
                 for w in ln.words:
                     if w.superscript and not any(ch.isalnum() for ch in w.text):
                         w.superscript = False  # traço/pontuação marcados como sobrescrito em versões anteriores
+                    elif w.superscript and len(w.text) >= 2 and w.text.isalpha() and not w.text.isupper():
+                        # Palavra comum ("ou", "uma", "Mas" da capitular) tida como sobrescrita pela
+                        # linha curvada da foto: chamada de nota é número ou sinal.
+                        w.superscript = False
             if b.user_edited or b.role in MARGIN_ROLES:
                 continue  # margens: o texto se repete igual em todas as páginas; não "corrigir" traços etc.
             # § no fim de uma linha e o número no começo da seguinte também contam.

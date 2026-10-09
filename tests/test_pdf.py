@@ -250,3 +250,59 @@ def test_paragrafos_do_corpo_justificados_com_recuo_igual():
     p.light = None  # capturas de tela: recuos medidos com precisão, ficam como estão
     bs[1].indent_first = 121
     assert even_body_paragraphs([p]) == 0
+
+
+def test_fusao_chamadas_de_nota_hifen_e_pontos():
+    from collections import Counter
+
+    from bookbuilder.layout import fusion
+
+    lex = fusion.Lexicon(Counter(), fusion.load_dictionary())
+
+    def fused(tess, surya):
+        runs = fusion.fuse(fusion._tokens_to_runs(fusion.runs_to_tokens([Run(tess)])), surya, lex)
+        return "".join(f"^{r.text}" if r.superscript else r.text for r in runs)
+
+    # Chamada de nota que o Tesseract lê como sinais; o Surya lê o número.
+    assert fused("estresse (TEPT).?º A maioria", "<p>estresse (TEPT).2 A maioria</p>") == "estresse (TEPT).^2 A maioria"
+    assert fused("na loteria.? Quantos", "<p>na loteria.4 Quantos</p>") == "na loteria.^4 Quantos"
+    assert fused("é integralidade” !º", "<p>é integralidade”.<sup>10</sup></p>") == "é integralidade”.^10"
+    # Divisão silábica do fim da linha mantida pelo Surya; ponto solto do Tesseract.
+    assert (fused("pessoas como. animais racionais esse é", "<p>pessoas como animais racio-</p><p>nais — esse é</p>")
+            == "pessoas como animais racionais — esse é")
+    # Algarismo no lugar de letra.
+    assert fused("Para mim, 2 única definição", "<p>Para mim, a única definição</p>") == "Para mim, a única definição"
+
+
+def test_palavra_partida_com_maiuscula():
+    from collections import Counter
+
+    from bookbuilder.layout import fusion
+
+    lex = fusion.Lexicon(Counter(), fusion.load_dictionary())
+    assert cleanup._join_split_word("Por que ela é im Portante? E", lex) == "Por que ela é importante? E"
+    assert cleanup._join_split_word("viu em São Paulo um Brasil", lex) == "viu em São Paulo um Brasil"
+
+
+def test_rodape_em_letra_pequena(tmp_path):
+    from docx import Document
+
+    from bookbuilder.export import docx_writer
+    from bookbuilder.model import Project, Style
+
+    def pg(i, blocks):
+        return Page(source=imageio.SourceRef(path=f"p{i}.png"), status=PageStatus.DONE, width=1500, height=2400,
+                    blocks=blocks)
+
+    body = [Block(id=f"b{i}", role=Role.BODY, bbox=(150, 300, 1350, 600), runs=[Run("Texto corrido da página.")])
+            for i in range(3)]
+    foot = [Block(id=f"f{i}", role=Role.FOOTER, bbox=(150, 2300, 600, 2340), runs=[Run("Tal Ben-Shahar")],
+                  lines=[Line(bbox=(150, 2300, 600, 2340), words=[_w("Tal", 150, 220, y=2340)])]) for i in range(3)]
+    proj = Project(pages=[pg(i, [body[i], foot[i]]) for i in range(3)])
+    proj.styles = {"s1": Style(id="s1", name="Corpo do texto", role=Role.BODY, size_pt=11.0)}
+    out = tmp_path / "x.docx"
+    docx_writer.write(proj, None, str(out))
+    d = Document(str(out))
+    assert d.styles["Footer"].font.size.pt == 5.0
+    par = d.sections[0].footer.paragraphs[0]
+    assert par.style.name == "Footer" and "Tal" in par.text

@@ -359,15 +359,22 @@ def unify_boxes(pages: list[Page]) -> None:
             prev_id = b.box_id.split("=")[-1]
 
 
-def even_body_paragraphs(pages: list[Page]) -> int:
+def even_body_paragraphs(pages: list[Page], body_style: str | None = None) -> int:
     """Páginas fotografadas: a curvatura e a perspectiva da foto deixam o
     recuo e as margens de cada parágrafo um pouco diferentes (e alguns
     parecem alinhados à esquerda). Os parágrafos do corpo do texto ficam
-    todos justificados, sem recuo lateral e com o mesmo recuo de primeira
-    linha (o do livro, ou nenhum). Blocos realmente recuados (epígrafe,
+    todos justificados, sem recuo lateral, com o mesmo recuo de primeira
+    linha (o do livro, ou nenhum) e no estilo do corpo do texto (``body_style``:
+    mesma fonte e tamanho; a foto faz alguns parecerem de outro corpo). Blocos realmente recuados (epígrafe,
     citação), centralizados ou curtos ficam como estão. Retorna os ajustados."""
     # Páginas de texto corrido (folha de rosto, sumário e créditos ficam de fora).
     scanned = [p for p in pages if p.light and any(b.role == Role.BODY and len(b.lines) >= 3 for b in p.blocks)]
+    for p in scanned:
+        for b in p.blocks:
+            # Parágrafo (ou continuação) que começa com travessão não é item de lista.
+            if (b.role == Role.LIST_ITEM and not b.role_locked and len(b.lines) >= 2 and b.lines[0].words
+                    and b.lines[0].words[0].text[:1] in "—–"):
+                b.role = Role.BODY
     cands = [b for p in scanned for b in p.blocks
              if b.role == Role.BODY and b.lines and not b.user_edited and not b.box_id
              and "entrada_sumario" not in b.flags and b.align not in ("center", "right")]
@@ -382,6 +389,8 @@ def even_body_paragraphs(pages: list[Page]) -> int:
         if b.indent_left > max(common, xh * 3) * 1.5:
             continue  # bloco recuado de verdade
         b.align = "justify"
+        if body_style:
+            b.style_id = body_style
         b.indent_left = 0.0
         b.indent_right = 0.0
         b.indent_first = common if (common and b.indent_first > common * 0.5) else 0.0

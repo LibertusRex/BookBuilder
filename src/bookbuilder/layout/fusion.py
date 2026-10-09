@@ -383,6 +383,10 @@ def decide_pair(t: Tok, s: Tok, lex: Lexicon, st: Stats) -> Tok:
     if a in PLACEHOLDERS:
         st.tess += 1
         return t
+    nc_tok = _note_call(t, s)
+    if nc_tok is not None:
+        st.surya += 1
+        return nc_tok
     if re.sub(r"(?<=\w)[–—](?=\w)", "-", b) == a:
         st.tess += 1  # hífen entre letras/números ("121-A") não vira traço
         return _fmt_from_surya(t, s)
@@ -447,6 +451,11 @@ def decide_pair(t: Tok, s: Tok, lex: Lexicon, st: Stats) -> Tok:
     if ROMAN_RE.match(b) or NUMBERING_RE.match(b):
         st.surya += 1
         return _with_text(t, s, b)
+    # Algarismo no lugar de letra ("2 única" × "a única"): a palavra do Surya.
+    if (any(ch.isdigit() for ch in a) and not any(ch.isdigit() for ch in b) and b.isalpha()
+            and lex.valid(b) and len(a) == len(b)):
+        st.surya += 1
+        return _with_text(t, s, b)
     # Uma letra de diferença (fora acentos/símbolos): Tesseract
     if lev(letters(ka), letters(kb), 1) <= 1 and letters(ka) and letters(kb):
         st.tess += 1
@@ -455,6 +464,69 @@ def decide_pair(t: Tok, s: Tok, lex: Lexicon, st: Stats) -> Tok:
     st.surya += 1
     st.flagged += 1
     return _surya_tok(s, t.sep, True, t.ti)
+
+
+# Chamada de nota sobrescrita que o Tesseract lê como "?º", "º", "!º".
+NOTE_JUNK = re.compile(r"[?!º°ª*'’]{1,3}")
+NOTE_CALL = re.compile(r"^(.*[\w)\]”\"»’])([.!?…]*[.!?…”»)])(\d{1,3})$")
+
+
+def _note_call(t: Tok, s: Tok) -> Tok | None:
+    """"(TEPT).?º" × "(TEPT).2", "loteria.?" × "loteria.4": o Surya leu o
+    número da chamada de nota que o Tesseract trocou por sinais (ou não viu,
+    quando o Surya o marca como sobrescrito). Fica o texto do Surya, com o
+    número sobrescrito."""
+    a, b = t.text, s.text
+    m = NOTE_CALL.match(b)
+    if not m:
+        return None
+    word, punct, num = m.groups()
+    tail = a[len(a.rstrip("?!º°ª*'’.,")):] if a else ""
+    head = a[: len(a) - len(tail)] if tail else a
+    if letters(key(head)) != letters(key(word)):
+        return None
+    sup = bool(s.segs) and s.segs[-1].superscript and s.segs[-1].text == num
+    if not (tail and NOTE_JUNK.search(tail)) and not sup:
+        return None  # sem sinal do Tesseract, só com o número sobrescrito pelo Surya
+    g0 = s.segs[0]
+    segs = [Seg(word + punct, g0.bold, g0.italic, g0.underline), Seg(num, superscript=True)]
+    return Tok(segs, t.sep, t.ti, s.sj)
+
+
+def _join_hyphenated(S: list[Tok], lex: Lexicon) -> list[Tok]:
+    """O Surya às vezes mantém a divisão silábica do fim da linha
+    ("racio-" "nais"): junta as partes ("racionais"); mantém o hífen quando
+    só a forma com hífen existe ("bem-" "estar")."""
+    out: list[Tok] = []
+    k = 0
+    while k < len(S):
+        s = S[k]
+        nxt = S[k + 1] if k + 1 < len(S) else None
+        txt = s.text
+        if (nxt is not None and len(txt) > 2 and txt.endswith("-") and txt[-2].isalpha()
+                and nxt.text[:1].islower()):
+            plain = txt[:-1] + nxt.text
+            keep = not lex.valid(plain) and lex.valid(txt + nxt.text)
+            segs = [Seg(g.text, g.bold, g.italic, g.underline, g.superscript, g.subscript, g.low_conf, g.note_ref)
+                    for g in s.segs]
+            if not keep:
+                segs[-1].text = segs[-1].text[:-1]
+            out.append(Tok([g for g in segs if g.text] + list(nxt.segs), nxt.sep, s.ti, s.sj))
+            k += 2
+            continue
+        out.append(s)
+        k += 1
+    return out
+
+
+def _drop_stray_periods(out: list[Tok], S: list[Tok]) -> None:
+    """Ponto que só o Tesseract viu, colado à palavra e seguido de minúscula
+    ("como. animais"): sujeira da imagem."""
+    for k, tok in enumerate(out[:-1]):
+        txt = tok.text
+        if (txt.endswith(".") and not txt.endswith("..") and len(txt) > 2 and txt[-2].isalpha()
+                and out[k + 1].text[:1].islower() and tok.sj and S[tok.sj[0]].text == txt[:-1]):
+            tok.segs[-1].text = tok.segs[-1].text[:-1]
 
 
 def _keep_curly(a: str, b: str) -> str:
@@ -487,7 +559,7 @@ def fuse_block(tess_runs: list[Run], surya_html: str, lex: Lexicon, st: Stats | 
     T = runs_to_tokens(tess_runs)
     for i, t in enumerate(T):
         t.ti = (i,)
-    S = html_to_tokens(surya_html)
+    S = _join_hyphenated(html_to_tokens(surya_html), lex)
     for j, s in enumerate(S):
         s.sj = (j,)
     tess_texts = [t.text for t in T]
@@ -540,6 +612,7 @@ def fuse_block(tess_runs: list[Run], surya_html: str, lex: Lexicon, st: Stats | 
             out += ins
     if out:
         out[-1].sep = ""
+    _drop_stray_periods(out, S)
     _fix_sections(out)
     found = _collect_disputes(out, T, S)
     if choices:
@@ -756,7 +829,7 @@ def _deleted(ts: list[Tok], st: Stats, lex: Lexicon | None = None, T: list[Tok] 
         elif LIST_MARKER_RE.match(txt) or (first and NUMBERING_RE.match(txt)):
             st.tess += 1  # marcador de lista ou numeração de seção que o Surya omite
             out.append(_tess_tok(t))
-        elif not any(ch.isalnum() for ch in txt) and txt not in ("–", "—", "§"):
+        elif (not any(ch.isalnum() for ch in txt) and txt not in ("–", "—", "§")) or NOTE_JUNK.fullmatch(txt):
             st.dropped += 1  # lixo do OCR que o Surya não viu
         elif any(g.low_conf for g in t.segs):
             st.dropped += 1

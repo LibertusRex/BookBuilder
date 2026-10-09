@@ -112,9 +112,10 @@ def analyze_document(project: Project, store=None, progress: Callable[[str], Non
     project.styles = styles.build_styles(project, pages, sample_loader, progress=say)
     rep.scale_source = project.analysis.get("scale_source", "")
     titles.fix_stray_styles(pages, project)
-    is_bold_f, is_italic_f = styles.word_formatter(project.styles, styles.page_norms(pages))
-
     style_alignment(pages)
+    # Antes de montar o texto: parágrafo justificado não leva tabulação.
+    even_body_paragraphs(pages, next((s.id for s in project.styles.values() if s.name == "Corpo do texto"), None))
+    is_bold_f, is_italic_f = styles.word_formatter(project.styles, styles.page_norms(pages))
 
     say("Reconstruindo parágrafos e hifenização…")
     low = project.settings.low_conf_threshold
@@ -154,7 +155,6 @@ def analyze_document(project: Project, store=None, progress: Callable[[str], Non
     continuations(pages, vocab, rep)
     unify_boxes(pages)
     cleanup.toc_entries(pages)
-    even_body_paragraphs(pages)
 
     for p in pages:
         if p.mean_conf and p.mean_conf < 75 or any("baixa_confianca" in b.flags for b in p.blocks if b.role in FLOW_ROLES):

@@ -227,7 +227,16 @@ def _setup_styles(doc, project: Project, pages: list[Page], geo: _Geometry) -> d
     # Cabeçalho e rodapé: tabulações central e à direita na largura do texto
     # desta página (as do Word são da folha Carta).
     for name in ("Header", "Footer"):
-        ts = doc.styles[name].paragraph_format.tab_stops
+        # Letra bem pequena, na fonte do corpo (o tamanho medido na foto
+        # fica grande demais na página do Word).
+        hf = doc.styles[name]
+        hf.font.size = Pt(max(5.0, round((body.size if body else 11.0) * 0.45 * 2) / 2))
+        hf.font.bold = False
+        hf.font.name = None
+        rpr = hf.element.get_or_add_rPr()
+        for rf in rpr.findall(qn("w:rFonts")):
+            rpr.remove(rf)
+        ts = hf.paragraph_format.tab_stops
         ts.clear_all()
         ts.add_tab_stop(Pt(geo.text_width / 2), WD_TAB_ALIGNMENT.CENTER)
         ts.add_tab_stop(Pt(geo.text_width), WD_TAB_ALIGNMENT.RIGHT)
@@ -479,8 +488,15 @@ def _margin_of(p: Page, blocks: list[Block], notes: list[str]) -> _Margin:
 def _fill_margin(container, margin: _Margin | None) -> None:
     for p in list(container.paragraphs):
         p._p.getparent().remove(p._p)
+    style = "Header" if "Header" in type(container).__name__ else "Footer"
+
+    def new_par(text: str = ""):
+        par = container.add_paragraph(text)
+        par.style = style
+        return par
+
     if margin is None or not margin.items:
-        container.add_paragraph("")
+        new_par("")
         return
     by_align: dict[str, tuple[str, bool]] = {}
     for t, a, has in margin.items:
@@ -491,13 +507,13 @@ def _fill_margin(container, margin: _Margin | None) -> None:
             by_align[a] = (t, has)
     if len(by_align) == 1:
         a, (t, has) = next(iter(by_align.items()))
-        par = container.add_paragraph()
+        par = new_par()
         par.alignment = ALIGN[a]
         _margin_text(par, t, has)
         return
     # Vários itens na mesma faixa (ex.: título à esquerda, número à direita):
     # um parágrafo com tabulações central e à direita.
-    par = container.add_paragraph()
+    par = new_par()
     _tab_stops(par)
     if "left" in by_align:
         _margin_text(par, *by_align["left"])

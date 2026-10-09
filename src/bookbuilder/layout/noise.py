@@ -176,6 +176,7 @@ def attach_initials(p: Page) -> None:
             overlap = min(y1, w.bbox[3]) - max(y0, w.bbox[1])
             if -h * 0.2 <= gap <= h * 0.6 and overlap >= (w.bbox[3] - w.bbox[1]) * 0.5:
                 w.text = letter + w.text
+                w.superscript = False  # a palavra fica no alto, ao lado da capitular
                 w.bbox = (min(x0, w.bbox[0]), min(y0, w.bbox[1]), w.bbox[2], max(y1, w.bbox[3]))
                 o.bbox = (min(x0, o.bbox[0]), min(y0, o.bbox[1]), o.bbox[2], o.bbox[3])
                 if o.surya_html:
