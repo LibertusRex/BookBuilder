@@ -33,9 +33,65 @@ class PageJob:
     figures_dir: str
 
 
-def _prepare_all(rgb: np.ndarray, settings: Settings):
+# Largura (lado menor) de trabalho das páginas de PDFs de digitalização. O
+# aplicativo recorta a folha, então a largura em pixels é proporcional à
+# resolução da foto; igualá-la deixa as letras do mesmo tamanho em todas as
+# páginas (fotos tiradas de distâncias diferentes), o que mantém os estilos.
+SCAN_WIDTH = 1800
+
+
+def _scaled(rgb: np.ndarray, scale: float) -> np.ndarray:
+    if abs(scale - 1.0) < 0.01:
+        return rgb
+    interp = cv2.INTER_AREA if scale < 1 else cv2.INTER_CUBIC
+    return cv2.resize(rgb, None, fx=scale, fy=scale, interpolation=interp)
+
+
+def _light(rgb: np.ndarray, scan: str) -> tuple[np.ndarray, dict | None]:
+    """Páginas digitalizadas/fotografadas: escala igualada (PDF),
+    iluminação igualada (sombras da mão, do celular, da lombada) e linhas
+    endireitadas (folha curvada). Figuras grandes ficam com o fundo do papel
+    em volta; uma página que é quase toda figura (capa) só tem a escala
+    ajustada. O que foi feito fica em ``Page.light`` e é refeito igual por
+    ``apply_light`` (Surya, árbitro, revisão)."""
+    if not scan:
+        return rgb, None
+    scale = round(SCAN_WIDTH / min(rgb.shape[:2]), 4) if scan == "pdf" else 1.0
+    rgb = _scaled(rgb, scale)
+    gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+    xh = preprocess.text_height(gray)
+    flat = preprocess.flatten_illumination(rgb, xh)
+    g = cv2.cvtColor(flat, cv2.COLOR_RGB2GRAY)
+    regions = detector.detect(preprocess.normalize(g, *preprocess.estimate_levels(g)))
+    keep = [list(map(int, r.bbox)) for r in regions if r.label in detector.FIGURE_LABELS]
+    area = sum((b[2] - b[0]) * (b[3] - b[1]) for b in keep)
+    if area > 0.5 * gray.size:
+        return rgb, {"scale": scale, "xh": 0}
+    light = {"scale": scale, "xh": round(xh, 2), "keep": keep}
+    if keep:
+        flat = preprocess.flatten_illumination(rgb, xh, keep)
+        g = cv2.cvtColor(flat, cv2.COLOR_RGB2GRAY)
+    warp = preprocess.fit_warp(preprocess.normalize(g, *preprocess.estimate_levels(g)), xh * 0.6)
+    if warp:
+        light["warp"] = warp
+        flat = preprocess.apply_warp(flat, warp)
+    return flat, light
+
+
+def apply_light(rgb: np.ndarray, light: dict | None) -> np.ndarray:
+    if not light:
+        return rgb
+    rgb = _scaled(rgb, light.get("scale", 1.0))
+    if not light.get("xh"):
+        return rgb
+    rgb = preprocess.flatten_illumination(rgb, light["xh"], [tuple(b) for b in light.get("keep", [])])
+    return preprocess.apply_warp(rgb, light.get("warp"))
+
+
+def _prepare_all(rgb: np.ndarray, settings: Settings, scan: str = ""):
     """Normaliza, detecta layout e sobreposições, endireita. Retorna
-    (preparo, regiões)."""
+    (preparo, regiões, imagem usada, iluminação)."""
+    rgb, light = _light(rgb, scan)
     gray0 = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
     bg, ink = preprocess.estimate_levels(gray0)
     norm = preprocess.normalize(gray0, bg, ink)
@@ -43,10 +99,10 @@ def _prepare_all(rgb: np.ndarray, settings: Settings):
     protect = [r.bbox for r in regions if r.label in detector.FIGURE_LABELS or r.label == "table"]
     text_h = [r.bbox[3] - r.bbox[1] for r in regions if r.label in ("header", "footer")]
     xh_hint = int(np.median(text_h) * 0.5) if text_h else max(12, rgb.shape[0] // 140)
-    prep = preprocess.prepare(rgb, protect=protect, deskew=True, xheight_hint=xh_hint)
+    prep = preprocess.prepare(rgb, protect=protect, deskew=True, xheight_hint=xh_hint, overlays=not scan)
     if prep.deskew:
         regions = detector.detect(prep.gray)
-    return prep, regions
+    return prep, regions, light
 
 
 def process_page(job: PageJob) -> dict:
@@ -58,8 +114,9 @@ def process_page(job: PageJob) -> dict:
         page.clear_results()
         page.dpi = imageio.read_dpi(page.source)
         rot = page.rotation
+        scan = imageio.scan_kind(page.source)
         rgb = imageio.load_rgb(page.source, rot)
-        prep, regions = _prepare_all(rgb, settings)
+        prep, regions, light = _prepare_all(rgb, settings, scan)
         lines = tesseract.ocr_hocr(prep.gray, lang=settings.language, psm=3)
         conf = _mean_conf(lines)
         page.auto_rotation = 0
@@ -67,14 +124,15 @@ def process_page(job: PageJob) -> dict:
             turn, oconf = tesseract.detect_orientation(prep.gray)
             if turn and oconf >= 2.0:
                 rgb2 = imageio.load_rgb(page.source, (rot + turn) % 360)
-                prep2, regions2 = _prepare_all(rgb2, settings)
+                prep2, regions2, light2 = _prepare_all(rgb2, settings, scan)
                 lines2 = tesseract.ocr_hocr(prep2.gray, lang=settings.language, psm=3)
                 if _mean_conf(lines2) > conf:
-                    rgb, prep, regions, lines = rgb2, prep2, regions2, lines2
+                    rgb, prep, regions, lines, light = rgb2, prep2, regions2, lines2, light2
                     page.auto_rotation = turn
         page.height, page.width = prep.gray.shape[:2]
         page.inverted = prep.inverted
         page.deskew = prep.deskew
+        page.light = light
         page.overlays = [_overlay(b) for b in prep.overlays]
         analysis = page_layout.analyze(prep.gray, prep.color, lines, regions, prep.overlays,
                                        page_key=page.uid[:8], low_conf=settings.low_conf_threshold,
@@ -129,7 +187,7 @@ def _mean_conf(lines) -> float:
 def work_gray(page: Page) -> tuple[np.ndarray, np.ndarray]:
     """Reconstrói a imagem de trabalho (cinza normalizada e cor) de uma página
     já processada, na mesma geometria das coordenadas dos blocos."""
-    rgb = imageio.load_rgb(page.source, (page.rotation + page.auto_rotation) % 360)
+    rgb = apply_light(imageio.load_rgb(page.source, (page.rotation + page.auto_rotation) % 360), page.light)
     gray0 = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
     bg, ink = preprocess.estimate_levels(gray0)
     gray = preprocess.normalize(gray0, bg, ink)

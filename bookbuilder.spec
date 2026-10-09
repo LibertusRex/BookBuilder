@@ -69,6 +69,8 @@ a = Analysis(
 # * partes do Qt e do OpenCV que o programa não usa (QML/Quick, PDF, OpenGL por
 #   software, vídeo/ffmpeg) e traduções do Qt que não sejam de português.
 vendor_names = {f.name.lower() for d in ("tesseract", "llama") for f in (VENDOR / d).glob("*.dll")}
+# ...menos as que o próprio Python usa na raiz (libffi para o ctypes, OpenSSL, zlib).
+vendor_names -= {f.name.lower() for f in (Path(sys.base_prefix) / "DLLs").glob("*.dll")}
 UNUSED = ("opengl32sw.dll", "qt6quick", "qt6qml", "qt6pdf", "qt6virtualkeyboard", "opencv_videoio_ffmpeg")
 
 

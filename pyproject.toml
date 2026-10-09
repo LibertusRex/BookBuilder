@@ -10,6 +10,7 @@ dependencies = [
     "onnxruntime==1.30.0",
     "opencv-python==5.0.0.93",
     "pillow==12.3.0",
+    "pypdfium2==5.14.0",
     "pyside6==6.11.2",
     "python-docx==1.2.0",
     "rapid-layout==1.2.1",

@@ -48,7 +48,8 @@ class AppState:
         proj = self.project
         base = Path.home() / "Documents" / "BookBuilder"
         base.mkdir(parents=True, exist_ok=True)
-        suggestion = base / f"{Path(proj.source_folder).name or 'projeto'}{projmod.SUFFIX}"
+        src = Path(proj.source_folder)
+        suggestion = base / f"{(src.stem if src.suffix.lower() == '.pdf' else src.name) or 'projeto'}{projmod.SUFFIX}"
         path, _ = QFileDialog.getSaveFileName(parent, "Onde salvar o projeto (para poder continuar depois)?",
                                               str(suggestion), f"Projeto BookBuilder (*{projmod.SUFFIX})")
         if not path:
@@ -237,11 +238,11 @@ class MainWindow(QMainWindow):
             return
         try:
             proj = projmod.new_project(folder)
-        except OSError as e:
-            QMessageBox.warning(self, "Pasta", f"Não foi possível ler a pasta: {e}")
+        except Exception as e:  # noqa: BLE001 - pasta inacessível, PDF danificado ou protegido
+            QMessageBox.warning(self, "Abrir", f"Não foi possível ler “{folder}”: {e}")
             return
         if not proj.pages:
-            QMessageBox.information(self, "Pasta", "Nenhuma imagem (PNG, JPG, TIFF, BMP, WebP) encontrada nesta pasta.")
+            QMessageBox.information(self, "Pasta", "Nenhuma imagem (PNG, JPG, TIFF, BMP, WebP) ou PDF encontrado.")
             return
         self.state.project = proj
         self.state.store = None

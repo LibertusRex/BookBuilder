@@ -9,6 +9,90 @@ from ..model import Block, Page, Role
 from . import fixes, fusion
 from .structure import FLOW_ROLES, MARGIN_ROLES
 
+LEADER = "." * 8
+PAGE_REF = re.compile(r"^[0-9]{1,4}$|^[ivxlcdm]{1,6}$", re.I)
+
+
+def dot_leaders(pages: list[Page]) -> int:
+    """Sumários: o pontilhado entre o título e o número da página é lido
+    pelo OCR como "palavras" de letras miúdas e confiança quase nula
+    ("aaaaaeaeeee", "CESSA E CPI NC") ou grudado no fim do título
+    ("FRENTE.....-0enssra"). Da esquerda para a direita ficam as palavras
+    do título; o resto, até o número no fim da linha, vira um pontilhado
+    só. Retorna as linhas corrigidas."""
+    n = 0
+    for p in pages:
+        for b in p.blocks:
+            if b.user_edited or b.role not in FLOW_ROLES + (Role.TITLE,):
+                continue
+            for ln in b.lines:
+                if _leader_line(ln):
+                    n += 1
+        _split_toc(p)
+    return n
+
+
+def _leader_line(ln) -> bool:
+    ws = ln.words
+    if len(ws) < 2 or not PAGE_REF.match(ws[-1].text) or any(w.text == LEADER for w in ws):
+        return False
+    tall = ws[-1].bbox[3] - ws[-1].bbox[1]  # algarismos: altura das maiúsculas
+    keep: list = []
+    zone: list = []
+    prefix = ""
+    for k, w in enumerate(ws[:-1]):
+        if zone:
+            zone.append(w)
+            continue
+        m = re.search(r"\.{2,}", w.text)
+        if m:
+            prefix = w.text[:m.start()]
+            zone.append(w)
+        elif k == 0 or (w.conf >= 50 and w.bbox[3] - w.bbox[1] >= tall * 0.6):
+            keep.append(w)
+        else:
+            zone.append(w)
+    if not zone:
+        return False
+    junky = sum(1 for w in zone if w.bbox[3] - w.bbox[1] < tall * 0.45 or ".." in w.text)  # pontos miúdos
+    span = zone[-1].bbox[2] - zone[0].bbox[0]
+    if (junky < max(1, len(zone) * 0.6) and ".." not in zone[0].text) or span < 3 * tall:
+        return False  # palavras duvidosas antes de um número, mas não um pontilhado
+    first = zone[0]
+    if re.search(r"[A-Za-zÀ-ÿ]", prefix):
+        keep.append(type(first)(text=prefix, bbox=first.bbox, conf=first.conf))
+    lead = type(first)(text=LEADER, bbox=(first.bbox[0], min(w.bbox[1] for w in zone), zone[-1].bbox[2],
+                                         max(w.bbox[3] for w in zone)), conf=100.0)
+    ln.words = keep + [lead, ws[-1]]
+    return True
+
+
+def _split_toc(p: Page) -> None:
+    """Sumário: cada entrada (até a linha que termina no número da página,
+    com pontilhado) vira um parágrafo, em vez de um bloco corrido."""
+    out: list[Block] = []
+    for b in p.blocks:
+        ends = [bool(ln.words) and PAGE_REF.match(ln.words[-1].text) is not None for ln in b.lines]
+        dotted = sum(any(w.text == LEADER for w in ln.words) for ln in b.lines)
+        if b.user_edited or len(b.lines) < 2 or sum(ends) < 2 or not dotted:
+            out.append(b)
+            continue
+        group: list = []
+        k = 0
+        for ln, end in zip(b.lines, ends):
+            group.append(ln)
+            if end or ln is b.lines[-1]:
+                x0 = min(g.bbox[0] for g in group)
+                y0 = min(g.bbox[1] for g in group)
+                x1 = max(g.bbox[2] for g in group)
+                y1 = max(g.bbox[3] for g in group)
+                out.append(Block(id=f"{b.id}-{k}", role=b.role, bbox=(x0, y0, x1, y1), kind=b.kind, lines=group,
+                                 conf=b.conf, order=b.order, style_id=b.style_id, flags=list(b.flags)))
+                group = []
+                k += 1
+    p.blocks = out
+
+
 def drop_repeated_tails(pages: list[Page]) -> None:
     """O recorte do Surya às vezes avança sobre o bloco seguinte e a primeira
     linha dele aparece também no fim deste (destacada, só o Surya leu)."""

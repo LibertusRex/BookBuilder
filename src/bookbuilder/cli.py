@@ -1,6 +1,6 @@
 """Uso em linha de comando (sem interface), útil para lotes e testes:
 
-    python -m bookbuilder.cli <pasta-de-imagens> --projeto <pasta.bookbuilder> [--limite N]
+    python -m bookbuilder.cli <pasta-de-imagens | livro.pdf> --projeto <pasta.bookbuilder> [--limite N]
            [--docx saida.docx] [--epub saida.epub] [--sem-surya] [--refazer]
 
     python -m bookbuilder.cli <documento.docx> [--epub saida.epub] [--titulo T] [--autor A] [--capa img]
@@ -48,7 +48,7 @@ def main(argv: list[str] | None = None) -> int:
               f"{er.images} imagens, {imp.tables} tabelas, {er.chapters} capítulos ({time.time() - t0:.0f}s)")
         return 0
     if not args.projeto:
-        ap.error("--projeto é obrigatório ao converter uma pasta de imagens")
+        ap.error("--projeto é obrigatório ao converter uma pasta de imagens ou um PDF")
 
     store = projmod.ProjectStore(args.projeto)
     proj = store.load() if store.exists() else projmod.new_project(args.pasta)

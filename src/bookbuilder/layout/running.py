@@ -240,6 +240,7 @@ def classify(pages: list[Page]) -> RunningResult:
     # 2) Rótulos do detector sem repetição: confirmar ou devolver ao conteúdo.
     repeated = {id(c.block) for cl in dense for c in cl} | {
         id(c.block) for cl in clusters for c in cl if "margem_deslocada" in c.block.flags}
+    has_header = any(c.block.role == Role.HEADER for cl in dense for c in cl)
     for p in pages:
         for b in p.blocks:
             if b.role_locked or id(b) in repeated or b.role not in (Role.HEADER, Role.FOOTER, Role.PAGE_NUMBER):
@@ -249,6 +250,14 @@ def classify(pages: list[Page]) -> RunningResult:
                 continue  # número isolado na margem: mantém
             if PERCENT_RE.match(text.strip()):
                 _set(b, Role.FOOTER, res)  # progresso de leitura do aplicativo
+                continue
+            # Documento sem cabeçalho corrido nenhum: um "cabeçalho" isolado no
+            # alto da página é um título de seção que caiu ali.
+            if b.role == Role.HEADER and not has_header and len(text.split()) >= 2:
+                letters = [ch for ch in text if ch.isalpha()]
+                caps = letters and sum(ch.isupper() for ch in letters) / len(letters) > 0.7
+                _set(b, Role.TITLE if caps or not text.rstrip().endswith(".") else Role.BODY, res)
+                b.flags.append("margem_reclassificada")
                 continue
             # Isolado: só continua como margem se for curto e pequeno.
             xh = _xh(b)

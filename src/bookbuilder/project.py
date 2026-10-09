@@ -112,10 +112,12 @@ def needs_processing(page: Page) -> bool:
 
 
 def new_project(folder: str) -> Project:
+    """``folder``: pasta de imagens ou um arquivo PDF."""
     pages = imageio.pages_from_folder(folder)
     proj = Project(source_folder=str(folder), pages=pages)
-    base = Path(folder).name or "documento"
+    src = Path(folder)
+    base = (src.stem if src.is_file() else src.name) or "documento"
     proj.export.base_name = base
     proj.export.title = base
-    proj.export.output_dir = str(Path(folder))
+    proj.export.output_dir = str(src.parent if src.is_file() else src)
     return proj

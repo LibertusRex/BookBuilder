@@ -1,6 +1,6 @@
 # BookBuilder
 
-Transforma uma pasta de imagens de páginas (fotos, digitalizações ou capturas de tela de um livro ou documento) em dois arquivos editáveis: **DOCX** (Word) e **EPUB 3**.
+Transforma uma pasta de imagens de páginas (fotos, digitalizações ou capturas de tela de um livro ou documento), ou um PDF de páginas digitalizadas, em dois arquivos editáveis: **DOCX** (Word) e **EPUB 3**.
 
 Tudo acontece **no seu computador**. As imagens e o texto nunca são enviados para a internet, e não há serviço pago. A internet só é usada uma vez, na instalação, para baixar as bibliotecas e os modelos de OCR.
 
@@ -32,8 +32,8 @@ Depois do passo 1 da Opção 2, rode **`gerar_executavel.bat`**:
 ## Como usar (quatro etapas)
 
 **1. Escolher imagens**
-- Clique em *Abrir pasta de imagens…* ou arraste a pasta para a janela.
-- Formatos aceitos: PNG, JPG, JPEG, TIFF (cada quadro de um TIFF multipágina vira uma página), BMP e WebP.
+- Clique em *Abrir pasta de imagens…* ou *Abrir PDF…*, ou arraste a pasta ou o PDF para a janela.
+- Formatos aceitos: PNG, JPG, JPEG, TIFF (cada quadro de um TIFF multipágina vira uma página), BMP, WebP e PDF (cada página do PDF vira uma página; feito para PDFs de aplicativos de digitalização, como o scanner do iPhone e o Scanner Pro).
 - A ordem é natural: "página 2" vem antes de "página 10". Arraste as miniaturas para reordenar.
 - Gire páginas ou exclua-as da conversão. **Os arquivos originais nunca são alterados.**
 - Escolha o idioma: português, inglês ou documento misto.
@@ -75,12 +75,14 @@ Depois do passo 1 da Opção 2, rode **`gerar_executavel.bat`**:
 | OCR | Tesseract 5.4 com os modelos de melhor qualidade (`tessdata_best`) de português e inglês. Títulos em fontes finas ou estreitas passam por um segundo OCR ampliado. |
 | Releitura com o Surya (opcional, placa de vídeo) | Surya OCR 2 executado localmente pelo llama.cpp (Vulkan) relê cada bloco de texto; o layout continua sendo do BookBuilder. As duas leituras são combinadas: concordância → aceita (sem amarelo); uma letra de diferença → Tesseract; palavras juntas no Tesseract × separadas no Surya → Surya; §, travessões, romanos, numeração, itálico/negrito → Surya; acentos do Surya só se a palavra existir no livro ou no dicionário pt-BR (VERO/LibreOffice); aspas curvas → Tesseract; outras diferenças → Surya com destaque amarelo. Releituras sem relação com o bloco (alucinação) são descartadas. Marcadores de lista ("a)") vêm do Tesseract; URLs bem formadas e números de processo CNJ/leis válidos (dígito verificador, formato N/AAAA) vencem. O que ainda divergir passa por um **árbitro por recorte**: a região é ampliada 3× e relida pelo Tesseract e pelo Surya; a maioria de votos decide, e só os empates ficam em amarelo. |
 | Pré-processamento | Inverte páginas em modo escuro; corrige inclinação e orientação. Detecta e apaga sobreposições da tela (avisos, botões, barras do leitor), marcando o texto encoberto. Remove os sublinhados tracejados de "destaques populares". |
+| Páginas fotografadas (PDF de digitalização, fotos de câmera) | A página do PDF é lida na resolução da própria foto e no giro em que o PDF a mostra; todas as páginas são levadas à mesma largura, para as letras terem o mesmo tamanho. A iluminação é igualada canal por canal (sombra da mão ou do celular, luz amarelada): o papel fica branco e o texto na sombra volta a ser legível. As linhas curvadas perto da lombada ou da borda são endireitadas a partir das próprias linhas de texto. Dedos e bordas na foto são retirados como ruído. A detecção de sobreposições do leitor fica desligada (uma sombra nunca apaga texto). As figuras saem com a mesma correção de luz. A camada de texto que o aplicativo de digitalização grava no PDF é ignorada (o OCR é refeito). |
 | Layout | Modelo PP-DocLayout V3 (ONNX, local) para títulos, texto, tabelas, figuras, legendas, cabeçalhos, rodapés e notas. Ordem de leitura por cortes recursivos (respeita duas colunas). |
 | Parágrafos | Linhas reunidas em parágrafos pelo recuo e pelo espaçamento. A hifenização no fim da linha é desfeita com cuidado: "crimi-/nalidade" vira "criminalidade", mas "acreditava-/se" e "contra-/ataque" mantêm o hífen. Parágrafos que continuam na página seguinte são unidos. |
 | Cabeçalhos e rodapés | Decididos pelo documento inteiro: posição, repetição entre páginas, texto parecido com os números mascarados, alternância par/ímpar e numeração crescente. A posição sozinha nunca basta. |
 | Notas de rodapé | Corpo menor no pé da página, com chamada; ligadas à chamada sobrescrita no texto. |
 | Fontes e tamanhos | Trechos da imagem comparados com as mesmas palavras desenhadas nas fontes instaladas no Windows. Tamanho pela altura das letras, convertida em pontos pela escala escolhida. |
 | Ruído gráfico | Ícones do livro digital (fone, documento, seta de ampliar, alfinete), molduras dos quadros de podcast/vídeo lidas como letras ("Lone —", "LER"), a interface do leitor e a janela "Go to page…" de capturas feitas durante a navegação, e recortes de imagem que repetem um texto vizinho são retirados. Ficam como "artefato" e podem ser devolvidos na revisão. |
+| Sumário e capitulares | O pontilhado entre o título e o número da página, que o OCR lê como letras miúdas, vira um pontilhado só, e cada entrada do sumário vira um parágrafo. A letra capitular, maior que o texto, volta para o início da palavra ("M" + "as" → "Mas"). |
 | Títulos | Títulos, subtítulos e seções sempre em negrito, também dentro de quadros ("SÍNTESE", "PONTO RELEVANTE PARA DEBATE"). Além do detector de layout, viram título: seção numerada de uma linha, linha curta em fonte maior que a do corpo, artigo sozinho na linha ("Art. 146") e o mesmo texto curto que é título no resto do livro. Os itens de uma SÍNTESE não são títulos. |
 | Acertos de texto | Traço entre espaços → travessão "—"; inciso "I" lido como "l", "1" ou "|"; "(inciso), I)" → "(inciso I)"; "§ 1.%" → "§ 1.º"; vírgula ou aspas sem o espaço certo; acento que falta numa palavra que o livro sempre escreve acentuada ("vitima" → "vítima"); palavra repetida pela releitura. |
 | DOCX | Estilos semânticos (Título 1–6, Normal, Legenda…). Cabeçalhos e rodapés nas áreas nativas do Word, com campos de número de página e total de páginas. Notas de rodapé nativas. Quadros com borda. Endereços web viram links. Nenhuma caixa de texto flutuante. |
@@ -93,6 +95,7 @@ Depois do passo 1 da Opção 2, rode **`gerar_executavel.bat`**:
 - **Surya:** precisa de placa de vídeo dedicada; deixa o processamento mais lento (cerca de 6–7 s por página contra ~2 s só com o Tesseract). Seus erros costumam parecer palavras certas — por isso as divergências que não se encaixam nas regras ficam em amarelo. O modelo tem licença AI Pubs OpenRAIL-M modificada (uso pessoal livre; há restrições comerciais).
 - **Fontes e tamanhos são estimativas.** Fontes comerciais de livros raramente estão instaladas; o programa usa a mais parecida, informa a substituição e mostra a semelhança. Você pode trocar a fonte de cada estilo.
 - **Capturas de tela não têm tamanho físico.** Nelas, o tamanho do corpo do texto (11 pt por padrão) define a escala, e as proporções entre títulos e texto são preservadas. Em digitalizações com DPI real, o DPI é usado.
+- **Fotos:** a correção da curvatura é aproximada (pensada para o OCR); páginas muito tremidas, com reflexo de flash ou com dedos sobre o texto não têm como ser recuperadas. Dicas: luz difusa, sem flash, celular paralelo à página e a folha bem aberta perto da lombada.
 - **Texto encoberto ou ilegível na imagem não é inventado.** Ele aparece como "[…]" ou é mantido como imagem marcada "ilegível" para você conferir.
 - **Diagramas e tabelas sem linhas visíveis** podem ser mantidos como imagem; o texto lido neles vira descrição alternativa.
 - **Negrito, itálico e sublinhado** são detectados de forma aproximada.

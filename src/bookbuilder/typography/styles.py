@@ -51,7 +51,44 @@ def _group(b: Block) -> str:
     return "texto"
 
 
-def block_features(b: Block) -> BlockFeat | None:
+def page_norms(pages: list[Page]) -> dict[str, tuple[float, float]]:
+    """Páginas digitalizadas/fotografadas (``Page.light``): cada foto tem
+    foco, luz e distância próprios, o que muda a altura de x e a espessura
+    aparente do traço de uma página para outra. Fator por bloco (altura,
+    traço) que leva o corpo de cada página à mediana do documento; o
+    negrito e o tamanho continuam relativos ao corpo da própria página.
+    Páginas com pouco texto corrido ficam como estão."""
+    per_page: dict[str, tuple[float, float]] = {}
+    for p in pages:
+        if not p.light:
+            continue
+        xs: list[float] = []
+        ss: list[float] = []
+        for b in p.blocks:
+            if b.role != Role.BODY or b.box_id:
+                continue
+            f = block_features(b)
+            if f is None or f.caps:
+                continue
+            xs += [f.xh] * len(b.lines)
+            ss += [f.stroke] * len(b.lines) if f.stroke else []
+        if len(xs) >= 10 and len(ss) >= 10:
+            per_page[p.uid] = (statistics.median(xs), statistics.median(ss))
+    if len(per_page) < 2:
+        return {}
+    gx = statistics.median(v[0] for v in per_page.values())
+    gs = statistics.median(v[1] for v in per_page.values())
+    out: dict[str, tuple[float, float]] = {}
+    for p in pages:
+        if p.uid in per_page:
+            px, ps = per_page[p.uid]
+            norm = (min(1.25, max(0.8, gx / px)), min(1.4, max(0.7, gs / ps)))
+            for b in p.blocks:
+                out[b.id] = norm
+    return out
+
+
+def block_features(b: Block, norm: tuple[float, float] = (1.0, 1.0)) -> BlockFeat | None:
     words = [w for ln in b.lines for w in ln.words if w.conf >= 60 and len(w.text) >= 2]
     xhs = [ln.xheight for ln in b.lines if ln.xheight > 0]
     if not words or not xhs:
@@ -63,8 +100,8 @@ def block_features(b: Block) -> BlockFeat | None:
     letters = "".join(w.text for w in words if w.text.isalpha())
     caps = len(letters) >= 4 and sum(ch.isupper() for ch in letters) / len(letters) > 0.8
     return BlockFeat(
-        xh=xh,
-        stroke=(statistics.median(strokes) / xh) if strokes else 0.0,
+        xh=xh * norm[0],
+        stroke=(statistics.median(strokes) / xh * norm[1]) if strokes else 0.0,
         slant=statistics.median(slants) if slants else 0.0,
         width=(statistics.median(widths) / xh) if widths else 0.0,
         caps=caps,
@@ -114,11 +151,12 @@ def _close(a: BlockFeat, c: BlockFeat) -> bool:
 
 def cluster(pages: list[Page]) -> list[_Cluster]:
     clusters: list[_Cluster] = []
+    norms = page_norms(pages)
     for p in pages:
         for b in p.blocks:
             if b.role in (Role.FIGURE, Role.TABLE, Role.ARTIFACT):
                 continue
-            f = block_features(b)
+            f = block_features(b, norms.get(b.id, (1.0, 1.0)))
             if f is None:
                 continue
             for c in clusters:
@@ -332,21 +370,24 @@ def resize_all(project: Project) -> None:
 # Negrito e itálico por palavra, relativos ao estilo
 
 
-def word_formatter(styles: dict[str, Style]):
+def word_formatter(styles: dict[str, Style], norms: dict[str, tuple[float, float]] | None = None):
+    """``norms``: fatores de ``page_norms`` (páginas digitalizadas)."""
     body = next((s for s in styles.values() if s.name == "Corpo do texto"), None)
     body_stroke = body.stroke_ratio if body else 0.0
+    norms = norms or {}
 
     def is_bold_factory(b: Block):
         st = styles.get(b.style_id or "")
         if st and st.bold:
             return lambda w, ln: True
         ref = (st.stroke_ratio if st else body_stroke) or body_stroke
+        sf = norms.get(b.id, (1.0, 1.0))[1]
 
         def f(w, ln):
             xh = ln.xheight or (st.xheight_px if st else 0)
             if not ref or not xh or not w.stroke or len(w.text) < 2:
                 return False
-            return (w.stroke / xh) >= ref * 1.3
+            return (w.stroke / xh) * sf >= ref * 1.3
 
         return f
 

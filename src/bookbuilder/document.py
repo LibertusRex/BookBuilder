@@ -86,11 +86,14 @@ def analyze_document(project: Project, store=None, progress: Callable[[str], Non
 
     say("Retirando ícones, molduras e telas do leitor lidos como conteúdo…")
     rep.noise = noise.mark(pages, fusion.Lexicon(vocab, fusion.load_dictionary()), noise.figure_text)
+    if store is not None:
+        noise.figures_from_garbage(pages, lambda p, box: _save_crop(store, p, box))
 
     hybrid.reread_margins(project, pages, say)
 
     say("Unindo parágrafos partidos e conferindo o alinhamento…")
     rep.merged = merge_split_paragraphs(pages)
+    cleanup.dot_leaders(pages)  # depois de juntar as linhas da mesma altura
     recompute_alignment(pages)
 
     say("Identificando notas de rodapé…")
@@ -107,7 +110,7 @@ def analyze_document(project: Project, store=None, progress: Callable[[str], Non
     project.styles = styles.build_styles(project, pages, sample_loader, progress=say)
     rep.scale_source = project.analysis.get("scale_source", "")
     titles.fix_stray_styles(pages, project)
-    is_bold_f, is_italic_f = styles.word_formatter(project.styles)
+    is_bold_f, is_italic_f = styles.word_formatter(project.styles, styles.page_norms(pages))
 
     style_alignment(pages)
 
@@ -198,6 +201,29 @@ def _confidence_flags(b: Block, low: float) -> None:
         b.flags.append("ilegivel")
     elif mean < 75 or n_low >= max(3, len(confs) * 0.06):
         b.flags.append("baixa_confianca")
+
+
+def _save_crop(store, p: Page, box) -> str:
+    """Recorte colorido da imagem de trabalho (mesma geometria dos blocos)."""
+    import os
+
+    import cv2
+
+    from .pipeline import work_gray
+
+    _, rgb = work_gray(p)
+    x0, y0, x1, y1 = box
+    crop = rgb[y0:y1, x0:x1]
+    if crop.size == 0:
+        return ""
+    name = f"{p.uid[:8]}-{x0}-{y0}.png"
+    os.makedirs(store.figures_dir, exist_ok=True)
+    ok, buf = cv2.imencode(".png", cv2.cvtColor(crop, cv2.COLOR_RGB2BGR))
+    if not ok:
+        return ""
+    with open(os.path.join(store.figures_dir, name), "wb") as f:
+        f.write(buf.tobytes())
+    return name
 
 
 def _page_text(p: Page) -> str:

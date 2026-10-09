@@ -57,6 +57,15 @@ def garbage_text(t: str, lex) -> bool:
     return good / letters < 0.3
 
 
+def _confident_words(b: Block) -> bool:
+    """Nomes próprios e palavras estrangeiras ("Tal Ben-Shahar",
+    "principium") não estão no dicionário, mas lidos com alta confiança e
+    bem-formados não são lixo de figura."""
+    ws = [w for ln in b.lines for w in ln.words]
+    return bool(ws) and all(w.conf >= 85 and re.fullmatch(r"[A-Za-zÀ-ÿ][a-zà-ÿ]+(?:-[A-Za-zÀ-ÿ][a-zà-ÿ]+)*[.,]?", w.text)
+                            and re.search(r"[aeiouáéíóúâêôãõ]", w.text.lower()) for w in ws)
+
+
 def sparse_text(b: Block, t: str) -> bool:
     """Poucas letras numa largura desproporcional: borda de quadro, ícone."""
     t = t.strip()
@@ -119,11 +128,71 @@ def _surya_rescues(b: Block, t: str, lex) -> bool:
     return bool(lb) and not garbage_text(st, lex) and fuzz.ratio(la, lb) >= 60
 
 
+def photo_edge(p: Page, b: Block) -> bool:
+    """Páginas fotografadas/digitalizadas: dedos segurando o livro, a borda
+    da página vizinha, a mesa. Encostam na borda do recorte e não têm texto
+    legível; figuras e texto do livro ficam dentro das margens."""
+    if not p.light or not p.width or not p.height:
+        return False
+    x0, y0, x1, y1 = b.bbox
+    mx, my = p.width * 0.012, p.height * 0.012
+    touches = x0 <= mx or y0 <= my or x1 >= p.width - mx or y1 >= p.height - my
+    if not touches:
+        return False
+    if b.role == Role.FIGURE:
+        area = (x1 - x0) * (y1 - y0) / (p.width * p.height)
+        return area < 0.08 or (area < 0.25 and "ilegivel" in b.flags)
+    if b.role in (Role.BODY, Role.LIST_ITEM, Role.QUOTE, Role.CAPTION):
+        confs = [w.conf for ln in b.lines for w in ln.words]
+        return len(b.lines) <= 2 and bool(confs) and sum(confs) / len(confs) < 60
+    return False
+
+
+INITIAL = "letra_inicial"
+
+
+def attach_initials(p: Page) -> None:
+    """Capitular: a primeira letra do parágrafo, maior que o texto, sai como
+    um bloco de uma letra só ("M") colado ao início da primeira linha do
+    parágrafo ("as o que…"). A letra volta para a palavra e o bloco vira
+    artefato (sem texto próprio)."""
+    for b in p.blocks:
+        if b.role_locked or b.user_edited or len(b.lines) != 1 or len(b.lines[0].words) != 1:
+            continue
+        if b.role not in (Role.BODY, Role.ARTIFACT) or (b.role == Role.ARTIFACT and FLAG not in b.flags):
+            continue
+        letter = b.lines[0].words[0].text
+        if len(letter) != 1 or not letter.isupper():
+            continue
+        x0, y0, x1, y1 = b.bbox
+        h = y1 - y0
+        for o in p.blocks:
+            if o is b or o.role not in (Role.BODY, Role.LIST_ITEM, Role.QUOTE) or not o.lines or not o.lines[0].words:
+                continue
+            w = o.lines[0].words[0]
+            if not w.text[:1].islower():
+                continue
+            gap = w.bbox[0] - x1
+            overlap = min(y1, w.bbox[3]) - max(y0, w.bbox[1])
+            if -h * 0.2 <= gap <= h * 0.6 and overlap >= (w.bbox[3] - w.bbox[1]) * 0.5:
+                w.text = letter + w.text
+                w.bbox = (min(x0, w.bbox[0]), min(y0, w.bbox[1]), w.bbox[2], max(y1, w.bbox[3]))
+                o.bbox = (min(x0, o.bbox[0]), min(y0, o.bbox[1]), o.bbox[2], o.bbox[3])
+                if o.surya_html:
+                    o.surya_html = re.sub(r"(<p>\s*)" + re.escape(w.text[1:]), lambda m: m.group(1) + w.text,
+                                          o.surya_html, count=1)
+                b.lines = []
+                b.role = Role.ARTIFACT
+                b.flags = [f for f in b.flags if f != FLAG] + [INITIAL]
+                break
+
+
 def mark(pages: list[Page], lex, figure_text=None) -> int:
     """Marca o ruído como artefato. ``figure_text(page, block)`` lê o texto
     de uma figura fina (para achar a barra "Go to page")."""
     n = 0
     for p in pages:
+        attach_initials(p)
         for b in p.blocks:
             if b.role_locked or b.user_edited or FLAG in b.flags:
                 continue
@@ -147,9 +216,11 @@ def mark(pages: list[Page], lex, figure_text=None) -> int:
                 t = " ".join(ln.text for ln in b.lines)
                 # Palavras juntadas pelo Tesseract parecem lixo: só conta se a
                 # releitura do Surya (quando houver) também não fizer sentido.
-                hit = sparse_text(b, t) or ui_bar_text(t) or (garbage_text(t, lex) and not _surya_rescues(b, t, lex))
+                hit = sparse_text(b, t) or ui_bar_text(t) or (garbage_text(t, lex) and not _surya_rescues(b, t, lex)
+                                                              and not _confident_words(b))
             elif b.role in (Role.HEADER, Role.FOOTER, Role.PAGE_NUMBER):
                 hit = ui_bar_text(" ".join(ln.text for ln in b.lines))
+            hit = hit or photo_edge(p, b)
             if hit:
                 b.role = Role.ARTIFACT
                 b.flags.append(FLAG)
@@ -187,3 +258,50 @@ def figure_text(p: Page, b: Block) -> tuple[str, float]:
     big = cv2.resize(crop, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
     text = " ".join(w.text for ln in tesseract.ocr_hocr(big, lang="por", psm=6) for w in ln.words)
     return text, float(crop.mean())
+
+
+def figures_from_garbage(pages: list[Page], save_crop) -> int:
+    """Páginas fotografadas: uma ilustração com rótulos (escala "−5 … 5",
+    "negativo / neutro / positivo") pode ser tomada por texto pelo detector
+    de layout e sair como lixo. Um bloco largo descartado como lixo vira
+    figura, junto com os rótulos descartados em volta.
+
+    ``save_crop(page, bbox) -> nome do arquivo`` grava o recorte."""
+    n = 0
+    for p in pages:
+        if not p.light or not p.width:
+            continue
+        ids = {b.id for b in p.blocks}
+        junk = [b for b in p.blocks if b.role == Role.ARTIFACT and FLAG in b.flags and b.lines
+                and not photo_edge(p, b) and not b.role_locked]
+        for b in junk:
+            if f"{b.id}-fig" in ids or "na_figura" in b.flags or b.bbox[2] - b.bbox[0] < p.width * 0.35:
+                continue
+            x0, y0, x1, y1 = b.bbox
+            lh = max(20, (y1 - y0) / max(1, len(b.lines)))
+            group = [b]
+            for o in junk:
+                if o is b or "na_figura" in o.flags:
+                    continue
+                if o.bbox[1] <= y1 + 1.5 * lh and o.bbox[3] >= y0 - 1.5 * lh and o.bbox[0] < x1 and o.bbox[2] > x0:
+                    group.append(o)
+                    x0, y0 = min(x0, o.bbox[0]), min(y0, o.bbox[1])
+                    x1, y1 = max(x1, o.bbox[2]), max(y1, o.bbox[3])
+            pad = int(lh * 0.5)
+            box = (max(0, x0 - pad), max(0, y0 - pad), min(p.width, x1 + pad), min(p.height, y1 + pad))
+            name = save_crop(p, box)
+            if not name:
+                continue
+            fig = Block(id=f"{b.id}-fig", role=Role.FIGURE, bbox=box, kind="figura_recuperada", order=b.order,
+                        image_file=name, flags=["figura_de_ruido"])
+            p.blocks.append(fig)
+            ids.add(fig.id)
+            for g in group:
+                g.flags.append("na_figura")
+            n += 1
+        # A moldura da ilustração tinha sido tomada por um quadro do livro.
+        frames = {g.box_id for g in p.blocks if "na_figura" in g.flags and g.box_id}
+        for o in p.blocks:
+            if o.box_id in frames and "na_figura" not in o.flags and not o.role_locked:
+                o.box_id = None
+    return n

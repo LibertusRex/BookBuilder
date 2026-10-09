@@ -1,0 +1,171 @@
+"""PDF de páginas digitalizadas (scanner do iPhone, Scanner Pro…): leitura
+das páginas, iluminação igualada (sombra da mão), linhas endireitadas
+(folha curvada), pontilhado de sumário e capitular."""
+
+from __future__ import annotations
+
+import dataclasses
+
+import cv2
+import numpy as np
+import pytest
+from PIL import Image, ImageDraw
+from rapidfuzz import fuzz
+
+from bookbuilder import imageio, paths
+from bookbuilder import project as projmod
+from bookbuilder.layout import cleanup, noise
+from bookbuilder.model import Block, Line, Page, PageStatus, Role, Settings, Word
+from bookbuilder.ocr import preprocess
+from bookbuilder.pipeline import PageJob, apply_light, process_page
+
+from .synth import PARAS, draw_paragraph, font
+
+W, H = 1500, 2400
+
+
+def _page(paras=PARAS[:4]) -> np.ndarray:
+    im = Image.new("L", (W, H), 255)
+    d = ImageDraw.Draw(im)
+    f = font("georgia.ttf", 9)
+    y = 220
+    for t in paras:
+        y = draw_paragraph(d, t, f, 150, y, W - 300) + 25
+    return np.asarray(im)
+
+
+def _photo(gray: np.ndarray, curl: bool = True) -> np.ndarray:
+    """Foto simulada: luz quente, sombra de borda nítida sobre metade da
+    página e, opcionalmente, a folha curvada perto da borda direita."""
+    g = gray.astype(np.float32)
+    if curl:
+        xs, ys = np.meshgrid(np.arange(W, dtype=np.float32), np.arange(H, dtype=np.float32))
+        dy = 70 * np.clip((xs / W - 0.55) / 0.45, 0, 1) ** 2 * (ys / H)
+        g = cv2.remap(g, xs, ys - dy, cv2.INTER_LINEAR, borderValue=255)
+    light = np.ones((H, W), np.float32) * 0.82
+    light[:, W // 2:] = 0.42  # sombra da mão
+    light = cv2.GaussianBlur(light, (0, 0), 6)
+    out = g[:, :, None] * light[:, :, None] * np.array([1.0, 0.93, 0.72], np.float32)
+    return np.clip(out, 0, 255).astype(np.uint8)
+
+
+@pytest.fixture(scope="module")
+def pdf(tmp_path_factory):
+    base = tmp_path_factory.mktemp("pdf")
+    pages = [Image.fromarray(_photo(_page())), Image.fromarray(_photo(_page(PARAS[2:]), curl=False))]
+    path = base / "livro.pdf"
+    pages[0].save(path, "PDF", save_all=True, append_images=pages[1:], resolution=200, quality=92)
+    return path
+
+
+def test_paginas_do_pdf(pdf):
+    refs = imageio.scan_folder(pdf)
+    assert len(refs) == 2
+    assert [r.display_name for r in refs] == ["livro.pdf [pág. 1]", "livro.pdf [pág. 2]"]
+    assert refs[0].uid != refs[1].uid and refs[0].uid == imageio.scan_folder(pdf)[0].uid
+    im = imageio.open_frame(refs[0])
+    assert abs(im.size[0] - W) <= 2 and abs(im.size[1] - H) <= 2  # resolução da foto, sem reamostrar
+    assert max(imageio.thumbnail(refs[0]).size) <= 200
+    assert imageio.read_dpi(refs[0]) == 0.0  # tamanho de página do aplicativo não é o do livro
+    assert imageio.scan_kind(refs[0]) == "pdf"
+
+
+def test_projeto_a_partir_do_pdf(pdf):
+    proj = projmod.new_project(str(pdf))
+    assert len(proj.pages) == 2
+    assert proj.export.base_name == "livro"
+    assert proj.export.output_dir == str(pdf.parent)
+
+
+def test_sombra_some_e_texto_fica():
+    gray = _page()
+    photo = _photo(gray, curl=False)
+    flat = preprocess.flatten_illumination(photo, preprocess.text_height(cv2.cvtColor(photo, cv2.COLOR_RGB2GRAY)))
+    g = cv2.cvtColor(flat, cv2.COLOR_RGB2GRAY)
+    paper = gray > 250
+    assert abs(float(np.median(g[:, :W // 2][paper[:, :W // 2]])) - float(np.median(g[:, W // 2:][paper[:, W // 2:]]))) < 8
+    ink = gray < 60
+    assert float(np.median(g[:, W // 2:][ink[:, W // 2:]])) < 110  # texto na sombra continua escuro
+    paper_rgb = flat[paper].reshape(-1, 3).mean(0)
+    assert paper_rgb.max() - paper_rgb.min() < 12  # papel branco, sem a cor da luz
+    bg, ink_level = preprocess.estimate_levels(g)
+    assert bg > ink_level  # não é tomada por "modo escuro"
+
+
+def test_curvatura_endireitada():
+    gray = _page()
+    curled = cv2.cvtColor(_photo(gray), cv2.COLOR_RGB2GRAY)
+    flat = preprocess.flatten_illumination(cv2.cvtColor(curled, cv2.COLOR_GRAY2RGB), 25)
+    g = preprocess.normalize(cv2.cvtColor(flat, cv2.COLOR_RGB2GRAY), *preprocess.estimate_levels(cv2.cvtColor(flat, cv2.COLOR_RGB2GRAY)))
+    warp = preprocess.fit_warp(g, 15)
+    assert warp is not None
+    fixed = preprocess.apply_warp(g, warp)
+
+    def sharp(img):  # linhas retas: perfil horizontal de tinta mais contrastado na metade direita
+        return float(np.var((img[:, W // 2:] < 128).sum(axis=1)))
+
+    assert sharp(fixed) > sharp(g) * 1.2
+    assert preprocess.fit_warp(gray, 15) is None  # página plana: nada a fazer
+
+
+def test_sem_sobreposicao_em_digitalizacao():
+    prep = preprocess.prepare(_photo(_page(), curl=False), overlays=False)
+    assert prep.overlays == []
+
+
+@pytest.mark.skipif(bool(paths.missing_components()), reason="componentes de OCR ausentes")
+def test_ocr_da_pagina_fotografada(pdf, tmp_path):
+    ref = imageio.scan_folder(pdf)[0]
+    job = PageJob(Page(source=ref).to_dict(), dataclasses.asdict(Settings()), str(tmp_path))
+    page = Page.from_dict(process_page(job))
+    assert page.status == PageStatus.DONE, page.error
+    assert page.light and page.light.get("warp") and not page.overlays and not page.inverted
+    text = " ".join(" ".join(ln.text for ln in b.lines) for b in page.ordered_blocks() if b.role != Role.ARTIFACT)
+    assert fuzz.token_set_ratio(text, " ".join(PARAS[:4])) >= 90
+    # A mesma imagem de trabalho é refeita igual (Surya, árbitro, revisão).
+    rgb = imageio.load_rgb(ref)
+    assert np.array_equal(apply_light(rgb, page.light), apply_light(rgb, page.light))
+    assert apply_light(rgb, page.light).shape[1] == 1800
+
+
+def _w(t, x0, x1, h=30, conf=95.0, y=100):
+    return Word(text=t, bbox=(x0, y - h, x1, y), conf=conf)
+
+
+def test_pontilhado_de_sumario():
+    ln = Line(bbox=(0, 60, 1400, 100), words=[
+        _w("2.", 0, 30), _w("Bem-estar", 40, 200), _w("físico", 210, 300),
+        _w("CESSA", 320, 500, h=12, conf=12), _w("E", 510, 530, h=7, conf=34), _w("CPI", 540, 700, h=7, conf=0),
+        _w("PELO", 710, 800, h=44, conf=8), _w("SO", 810, 1000, h=6, conf=18), _w("65", 1350, 1390)])
+    b = Block(id="b", role=Role.BODY, bbox=ln.bbox, lines=[ln])
+    p = Page(source=imageio.SourceRef(path="x.pdf"), blocks=[b])
+    assert cleanup.dot_leaders([p]) == 1
+    assert ln.text == "2. Bem-estar físico ........ 65"
+    # Título com os pontos grudados: a palavra fica.
+    ln2 = Line(bbox=(0, 60, 1400, 100), words=[_w("CONCLUSÃO:", 0, 200), _w("FRENTE.....-0enssra", 210, 900, conf=0),
+                                              _w("181", 1350, 1400)])
+    b.lines = [ln2]
+    cleanup.dot_leaders([p])
+    assert ln2.text == "CONCLUSÃO: FRENTE ........ 181"
+
+
+def test_texto_comum_terminado_em_numero_nao_vira_pontilhado():
+    words = [_w("todos", 0, 100), _w("(art.", 110, 170), _w("117,", 200, 243, h=29, conf=8),
+             _w("Ia", 270, 290, h=17, conf=0), _w("IV", 300, 330, h=23, conf=0)]
+    ln = Line(bbox=(0, 60, 330, 100), words=list(words))
+    p = Page(source=imageio.SourceRef(path="x.png"), blocks=[Block(id="b", role=Role.BODY, bbox=ln.bbox, lines=[ln])])
+    assert cleanup.dot_leaders([p]) == 0
+    assert ln.text == "todos (art. 117, Ia IV"
+
+
+def test_capitular_volta_para_a_palavra():
+    cap = Block(id="c", role=Role.BODY, bbox=(287, 491, 328, 540),
+                lines=[Line(bbox=(287, 491, 328, 540), words=[Word("M", (287, 491, 328, 540), 90.0)])])
+    first = Word("as", (330, 512, 370, 540), 95.0)
+    body = Block(id="b", role=Role.BODY, bbox=(281, 510, 1754, 653),
+                 lines=[Line(bbox=(330, 510, 1754, 545), words=[first, Word("o", (380, 518, 395, 540), 95.0)])],
+                 surya_html="<p>as o que</p>")
+    p = Page(source=imageio.SourceRef(path="x.pdf"), blocks=[cap, body])
+    noise.attach_initials(p)
+    assert first.text == "Mas" and body.surya_html == "<p>Mas o que</p>"
+    assert cap.role == Role.ARTIFACT and not cap.lines

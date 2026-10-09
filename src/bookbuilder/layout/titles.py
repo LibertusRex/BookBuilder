@@ -84,8 +84,8 @@ def promote_titles(pages: list[Page], project: Project) -> None:
             if not free(b):
                 continue
             t = b.text.strip()
-            if not _short_heading_text(t) or len(b.lines) > 2:
-                continue
+            if not _short_heading_text(t) or len(b.lines) > 2 or "...." in t:
+                continue  # "...." : entrada de sumário, não título
             st = project.styles.get(b.style_id or "")
             if len(b.lines) == 1 and NUMBERED_RE.match(t) and re.search(r"[A-Za-zÀ-ÿ]", t) and b.style_id != body_sid:
                 b.role = Role.TITLE

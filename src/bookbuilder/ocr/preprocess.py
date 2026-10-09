@@ -123,6 +123,138 @@ def _overlap_frac(a: BBox, b: BBox) -> float:
     return ix * iy / area
 
 
+def text_height(gray: np.ndarray) -> float:
+    """Altura típica das letras (px), pelos componentes de um limiar
+    adaptativo: funciona mesmo com sombra e fundo desigual."""
+    h, w = gray.shape[:2]
+    f = max(1, max(h, w) // 1600)
+    small = gray[::f, ::f]
+    blk = max(15, (min(small.shape) // 40) | 1)
+    ink = cv2.adaptiveThreshold(small, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY_INV, blk, 15)
+    n, _, st, _ = cv2.connectedComponentsWithStats(ink, connectivity=8)
+    hs = st[1:, 3][(st[1:, 3] >= 4) & (st[1:, 3] <= small.shape[0] // 15) & (st[1:, 2] <= small.shape[1] // 10)]
+    if hs.size >= 50:
+        hs = hs[hs >= 0.4 * np.percentile(hs, 90)]  # sem pontos, vírgulas e pontilhados
+    if hs.size < 50:
+        return max(12.0, h / 110)
+    return float(np.median(hs)) * f
+
+
+def flatten_illumination(rgb: np.ndarray, xh: float, keep: list[BBox] | None = None) -> np.ndarray:
+    """Iguala a iluminação de páginas fotografadas/digitalizadas: estima o
+    papel sem as letras (fechamento morfológico), canal por canal, e divide a
+    imagem por ele. O papel fica branco por igual (também sem a cor da luz),
+    e o texto na sombra recupera o contraste; as bordas nítidas de sombras
+    (mão, celular) são acompanhadas.
+
+    ``keep``: figuras, cujo "fundo" vem do papel em volta (senão uma foto
+    escura seria clareada até sumir)."""
+    h, w = rgb.shape[:2]
+    f = 4
+    small = cv2.resize(rgb, (max(1, w // f), max(1, h // f)), interpolation=cv2.INTER_AREA)
+    k = max(5, int(xh * 2.5 / f)) | 1
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
+    mask = None
+    if keep:
+        mask = np.zeros(small.shape[:2], np.uint8)
+        for x0, y0, x1, y1 in keep:
+            mask[max(0, y0 // f - 2):y1 // f + 2, max(0, x0 // f - 2):x1 // f + 2] = 255
+    chans = []
+    for c in range(3):
+        bg = cv2.morphologyEx(np.ascontiguousarray(small[:, :, c]), cv2.MORPH_CLOSE, kernel)
+        bg = cv2.medianBlur(bg, k)
+        if mask is not None:
+            bg = cv2.inpaint(bg, mask, 5, cv2.INPAINT_TELEA)
+        chans.append(bg)
+    bg = cv2.resize(np.dstack(chans), (w, h), interpolation=cv2.INTER_LINEAR).astype(np.float32)
+    out = rgb.astype(np.float32) * (255.0 / np.maximum(bg, 1.0))
+    return np.clip(out, 0, 255).astype(np.uint8)
+
+
+def _warp_terms(x: np.ndarray, y: np.ndarray) -> np.ndarray:
+    """Monômios xⁱ·yʲ com i ≥ 1: os termos só em y equivalem a deslocar uma
+    linha inteira e ficam com a posição própria de cada linha."""
+    return np.stack([x ** i * y ** j for i in range(1, 5) for j in range(0, 3) if i + j <= 5], axis=-1)
+
+
+def fit_warp(gray: np.ndarray, xh: float) -> dict | None:
+    """Curvatura da página (perto da lombada, folha que não ficou plana),
+    medida pelas próprias linhas de texto: cada linha deveria ser reta e
+    horizontal. Ajusta um deslocamento vertical suave f(x, y) comum a todas
+    as linhas (mínimos quadrados, com pesos que descartam figuras e fios).
+    Retorna None quando a página já é plana ou não há linhas suficientes.
+
+    ``gray``: imagem normalizada (texto escuro); ``xh``: altura de x, px."""
+    h, w = gray.shape
+    ink = (gray < 128).astype(np.uint8)
+    kx = max(3, int(xh * 1.2))
+    lines = cv2.morphologyEx(ink, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (kx, max(1, int(xh * 0.15)))))
+    lines = cv2.morphologyEx(lines, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_RECT, (kx, 1)))
+    n, lab, st, _ = cv2.connectedComponentsWithStats(lines, connectivity=8)
+    step = max(4, int(xh))
+    xs, ys, ids = [], [], []
+    for i in range(1, n):
+        x, y, bw, bh, _ = st[i]
+        if bw < 6 * xh or bh > 3.0 * xh or bh < 0.4 * xh:
+            continue
+        sub = (lab[y:y + bh, x:x + bw] == i) & (ink[y:y + bh, x:x + bw] > 0)
+        prof = np.arange(bh, dtype=np.float32)[:, None]
+        for cx in range(0, bw - step + 1, step):
+            col = sub[:, cx:cx + step]
+            mass = col.sum()
+            if mass == 0:
+                continue
+            xs.append(x + cx + step / 2)
+            ys.append(y + float((col * prof).sum() / mass))
+            ids.append(i)
+    if len(set(ids)) < 8 or len(xs) < 100:
+        return None
+    xs, ys = np.array(xs), np.array(ys)
+    uniq, inv = np.unique(np.array(ids), return_inverse=True)
+    T = _warp_terms(xs / w, ys / h)
+    L = np.zeros((len(xs), len(uniq)))
+    L[np.arange(len(xs)), inv] = 1
+    A = np.hstack([T, L])
+    wgt = np.ones(len(xs))
+    for _ in range(4):
+        sol, *_ = np.linalg.lstsq(A * wgt[:, None], ys * wgt, rcond=None)
+        res = A @ sol - ys
+        s = max(1.0, float(np.median(np.abs(res))) * 1.5)
+        wgt = 1 / np.maximum(1, np.abs(res) / (2 * s))
+    box = [float(xs.min() / w), float(ys.min() / h), float(xs.max() / w), float(ys.max() / h)]
+    warp = {"c": [round(float(c), 4) for c in sol[:T.shape[1]]], "box": [round(b, 4) for b in box]}
+    f = _warp_field(warp, w, h, every=8)
+    if np.abs(f).max() < 0.3 * xh or float(np.median(np.abs(res))) > 0.25 * xh:
+        return None  # já plana, ou o ajuste não explica as linhas
+    return warp
+
+
+def _warp_field(warp: dict, w: int, h: int, every: int = 1) -> np.ndarray:
+    """Deslocamento vertical f(x, y), px, relativo ao centro de cada linha.
+    Fora da área do texto o campo não é extrapolado (fica o da borda)."""
+    x0, y0, x1, y1 = warp["box"]
+    gx = np.clip(np.arange(0, w, every, dtype=np.float32) / w, x0, x1)
+    gy = np.clip(np.arange(0, h, every, dtype=np.float32) / h, y0, y1)
+    X, Y = np.meshgrid(gx, gy)
+    c = np.asarray(warp["c"], dtype=np.float32)
+    f = _warp_terms(X, Y) @ c
+    xm = np.clip(np.float32(0.5), x0, x1)
+    fm = _warp_terms(np.full_like(gy, xm), gy) @ c
+    return f - fm[:, None]
+
+
+def apply_warp(img: np.ndarray, warp: dict | None) -> np.ndarray:
+    """Endireita as linhas segundo ``fit_warp`` (mesma geometria sempre)."""
+    if not warp:
+        return img
+    h, w = img.shape[:2]
+    small = _warp_field(warp, w, h, every=4).astype(np.float32)
+    f = cv2.resize(small, (w, h), interpolation=cv2.INTER_LINEAR)
+    mx, my = np.meshgrid(np.arange(w, dtype=np.float32), np.arange(h, dtype=np.float32))
+    border = (255, 255, 255) if img.ndim == 3 else 255
+    return cv2.remap(img, mx, my + f, cv2.INTER_CUBIC, borderMode=cv2.BORDER_CONSTANT, borderValue=border)
+
+
 def normalize(gray: np.ndarray, bg: int, ink: int) -> np.ndarray:
     """Estica o contraste para tinta preta e fundo branco."""
     if bg < ink:  # modo escuro
@@ -215,12 +347,14 @@ def rotate(img: np.ndarray, angle: float, border: int | tuple[int, int, int]) ->
 
 
 def prepare(rgb: np.ndarray, protect: list[BBox] | None = None, deskew: bool = True,
-            xheight_hint: int = 20) -> Prepared:
+            xheight_hint: int = 20, overlays: bool = True) -> Prepared:
+    """``overlays=False`` para páginas digitalizadas/fotografadas: não há
+    interface de leitor a apagar, e sombras não podem ser tomadas por ela."""
     gray0 = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
     bg, ink = estimate_levels(gray0)
     inverted = bg < ink
     gray = normalize(gray0, bg, ink)
-    overlays = detect_overlays(rgb, bg, ink, xheight_hint=xheight_hint, protect=protect, norm=gray)
+    overlays = detect_overlays(rgb, bg, ink, xheight_hint=xheight_hint, protect=protect, norm=gray) if overlays else []
     for x0, y0, x1, y1 in overlays:
         gray[y0:y1, x0:x1] = 255
     remove_dashed_rules(gray)

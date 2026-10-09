@@ -14,7 +14,9 @@ from ..ocr import preprocess
 
 
 def page_pixmap(page: Page) -> QPixmap:
-    rgb = imageio.load_rgb(page.source, (page.rotation + page.auto_rotation) % 360)
+    from ..pipeline import apply_light
+
+    rgb = apply_light(imageio.load_rgb(page.source, (page.rotation + page.auto_rotation) % 360), page.light)
     if page.deskew:
         rgb = preprocess.work_view(rgb, page.deskew, page.inverted)
     rgb = np.ascontiguousarray(rgb)

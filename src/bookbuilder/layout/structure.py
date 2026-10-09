@@ -77,7 +77,7 @@ def _merge_same_row_lines(b: Block) -> bool:
             h = min(a.bbox[3] - a.bbox[1], c.bbox[3] - c.bbox[1])
             v = min(a.bbox[3], c.bbox[3]) - max(a.bbox[1], c.bbox[1])
             hx = min(a.bbox[2], c.bbox[2]) - max(a.bbox[0], c.bbox[0])
-            if h > 0 and v > h * 0.5 and hx <= 0:
+            if h > 0 and v > h * 0.4 and hx <= h * 0.25:  # encostadas ou quase (pontilhado de sumário)
                 left, right = (a, c) if a.bbox[0] <= c.bbox[0] else (c, a)
                 a.words = left.words + right.words
                 a.bbox = (min(a.bbox[0], c.bbox[0]), min(a.bbox[1], c.bbox[1]),

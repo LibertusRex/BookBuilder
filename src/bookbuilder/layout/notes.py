@@ -33,6 +33,8 @@ def detect_footnotes(pages: list[Page], body_xh: float) -> None:
         for b in p.blocks:
             if b.role_locked or b.role not in (Role.BODY, Role.FOOTER):
                 continue
+            if b.role == Role.FOOTER and "verificar_margem" not in b.flags:
+                continue  # rodapé repetido ("12 Tal Ben-Shahar"): o número é o da página
             xh = statistics.median([ln.xheight for ln in b.lines if ln.xheight] or [0])
             if not xh or xh > body_xh * 0.88:
                 continue
@@ -49,6 +51,9 @@ def detect_footnotes(pages: list[Page], body_xh: float) -> None:
 def link_footnotes(pages: list[Page], rep: DocReport) -> None:
     prev_note: Block | None = None
     for p in pages:
+        for b in p.blocks:  # aviso de uma análise anterior (o bloco pode ter deixado de ser nota)
+            if "nota_sem_chamada" in b.flags:
+                b.flags.remove("nota_sem_chamada")
         notes = [b for b in p.ordered_blocks() if b.role == Role.FOOTNOTE]
         refs: dict[str, list[Run]] = {}
         for b in p.ordered_blocks():

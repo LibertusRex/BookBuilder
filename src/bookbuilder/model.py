@@ -414,6 +414,8 @@ class SourceRef:
         import os
 
         name = os.path.basename(self.path)
+        if name.lower().endswith(".pdf"):
+            return f"{name} [pág. {self.frame + 1}]"
         return f"{name} [quadro {self.frame + 1}]" if self.frame else name
 
 
@@ -447,6 +449,9 @@ class Page:
     duplicate_of: str | None = None  # uid da página idêntica anterior
     mean_conf: float = 0.0
     surya: bool = False  # texto relido pelo Surya
+    # Iluminação igualada (páginas digitalizadas/fotografadas): {"xh": altura
+    # das letras, "keep": figuras}; None = imagem usada como está.
+    light: dict | None = None
 
     @property
     def uid(self) -> str:
@@ -475,6 +480,7 @@ class Page:
             "duplicate_of": self.duplicate_of,
             "mean_conf": round(self.mean_conf, 1),
             "surya": self.surya,
+            **({"light": self.light} if self.light is not None else {}),
         }
 
     @classmethod
@@ -498,6 +504,7 @@ class Page:
             duplicate_of=d.get("duplicate_of"),
             mean_conf=d.get("mean_conf", 0.0),
             surya=d.get("surya", False),
+            light=d.get("light"),
         )
 
     def clear_results(self) -> None:
@@ -509,6 +516,7 @@ class Page:
         self.printed_number = None
         self.duplicate_of = None
         self.surya = False
+        self.light = None
 
 
 # ---------------------------------------------------------------------------

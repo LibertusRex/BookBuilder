@@ -47,14 +47,19 @@ class ImagesStep(QWidget):
         self.btn_open = QPushButton("Abrir pasta de imagens…")
         self.btn_open.setMinimumHeight(36)
         self.btn_open.clicked.connect(self._choose_folder)
-        self.lbl_folder = QLabel("Nenhuma pasta aberta. Você também pode arrastar uma pasta para esta janela "
-                                 "(ou um arquivo .docx, para convertê-lo em EPUB).")
+        self.btn_pdf = QPushButton("Abrir PDF…")
+        self.btn_pdf.setMinimumHeight(36)
+        self.btn_pdf.setToolTip("PDF de páginas digitalizadas (por exemplo, do scanner do iPhone ou do Scanner Pro)")
+        self.btn_pdf.clicked.connect(self._choose_pdf)
+        self.lbl_folder = QLabel("Nenhuma pasta aberta. Você também pode arrastar uma pasta ou um PDF para esta "
+                                 "janela (ou um arquivo .docx, para convertê-lo em EPUB).")
         self.lbl_folder.setWordWrap(True)
         self.btn_docx = QPushButton("Converter DOCX em EPUB…")
         self.btn_docx.setMinimumHeight(36)
         self.btn_docx.setToolTip("Converte um documento do Word (por exemplo, o livro já revisado) em EPUB")
         self.btn_docx.clicked.connect(lambda: self._docx_to_epub(""))
         top.addWidget(self.btn_open)
+        top.addWidget(self.btn_pdf)
         top.addWidget(self.lbl_folder, 1)
         top.addWidget(self.btn_docx)
 
@@ -117,6 +122,11 @@ class ImagesStep(QWidget):
         if d:
             self.open_folder_requested.emit(d)
 
+    def _choose_pdf(self) -> None:
+        f, _ = QFileDialog.getOpenFileName(self, "Escolha o PDF com as páginas digitalizadas", "", "PDF (*.pdf)")
+        if f:
+            self.open_folder_requested.emit(f)
+
     def _docx_to_epub(self, path: str) -> None:
         from .docx_dialog import DocxToEpubDialog
 
@@ -137,6 +147,9 @@ class ImagesStep(QWidget):
             if os.path.isfile(path) and path.lower().endswith(".docx"):
                 self._docx_to_epub(path)
                 return
+            if os.path.isfile(path) and path.lower().endswith(".pdf"):
+                self.open_folder_requested.emit(path)
+                return
             if os.path.isfile(path):
                 self.open_folder_requested.emit(os.path.dirname(path))
                 return
@@ -146,10 +159,10 @@ class ImagesStep(QWidget):
         proj = self.state.project
         self.list.clear()
         if proj is None:
-            self.lbl_folder.setText("Nenhuma pasta aberta. Você também pode arrastar uma pasta para esta janela.")
+            self.lbl_folder.setText("Nenhuma pasta aberta. Você também pode arrastar uma pasta ou um PDF para esta janela.")
             self._update_count()
             return
-        self.lbl_folder.setText(f"Pasta: {proj.source_folder}")
+        self.lbl_folder.setText(f"{'PDF' if proj.source_folder.lower().endswith('.pdf') else 'Pasta'}: {proj.source_folder}")
         idx = self.cmb_lang.findData(proj.settings.language)
         self.cmb_lang.blockSignals(True)
         self.cmb_lang.setCurrentIndex(max(0, idx))
