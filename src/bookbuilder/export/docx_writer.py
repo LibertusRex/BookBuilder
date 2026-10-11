@@ -64,6 +64,11 @@ class DocxResult:
     notes: list[str] = field(default_factory=list)
 
 
+def _percentile(values: list[float], q: float) -> float:
+    s = sorted(values)
+    return s[min(len(s) - 1, int(q * (len(s) - 1) + 0.5))]
+
+
 class _Geometry:
     """Conversões de pixels da imagem para pontos tipográficos."""
 
@@ -74,14 +79,18 @@ class _Geometry:
         self.page_w = statistics.median(widths) / self.ppp
         self.page_h = statistics.median(heights) / self.ppp
         flow = [b for p in pages for b in p.blocks if b.role in FLOW_ROLES and len(b.lines) >= 2]
+        # Coluna do texto corrido: os percentis 10 e 90 ignoram os quadros e
+        # colunas laterais (no meio da página, a mediana cairia dentro deles).
         lefts = [b.bbox[0] for b in flow] or [widths[0] * 0.1]
         rights = [b.bbox[2] for b in flow] or [widths[0] * 0.9]
+        left_col = _percentile(lefts, 0.1)
+        right_col = _percentile(rights, 0.9)
         tops = [min(b.bbox[1] for b in p.blocks if b.role in FLOW_ROLES or b.role == Role.TITLE)
                 for p in pages if any(b.role in FLOW_ROLES or b.role == Role.TITLE for b in p.blocks)] or [heights[0] * 0.1]
         bottoms = [max(b.bbox[3] for b in p.blocks if b.role in FLOW_ROLES or b.role == Role.FOOTNOTE)
                    for p in pages if any(b.role in FLOW_ROLES for b in p.blocks)] or [heights[0] * 0.9]
-        self.margin_l = max(36.0, statistics.median(lefts) / self.ppp)
-        self.margin_r = max(36.0, self.page_w - statistics.median(rights) / self.ppp)
+        self.margin_l = max(36.0, left_col / self.ppp)
+        self.margin_r = max(36.0, self.page_w - right_col / self.ppp)
         self.margin_t = max(36.0, statistics.median(tops) / self.ppp)
         self.margin_b = max(36.0, self.page_h - statistics.median(bottoms) / self.ppp)
         if self.page_w - self.margin_l - self.margin_r < 144:
@@ -107,8 +116,92 @@ class _Geometry:
 # Estilos
 
 
-def _style_font(style, st: Style | None, size: float | None = None) -> None:
-    fam = _usable_family(st) if st else "Georgia"
+# Citações de jurisprudência (linhas que começam com ►, », STJ) saem menores.
+CITATION_PT = 10.0
+CITATION_START = re.compile(r"^\s*(?:[►»▸]|D?ST[J)])")
+
+
+def _is_citation(b: Block) -> bool:
+    return b.role in FLOW_ROLES and bool(CITATION_START.match(b.text))
+
+
+def _set_size(par, pt: float) -> None:
+    for r in par.runs:
+        if not r.font.superscript and not r.font.subscript:
+            r.font.size = Pt(pt)
+
+
+# Uma fonte e um tamanho por tipo de parte, no livro inteiro: "body" (corpo,
+# quadros e sumário), "t1".."t6" (títulos de cada nível, uma família para todos),
+# "fn" (notas), "cap" (legendas). Preenchido por _compute_look a partir do
+# estilo mais usado de cada tipo.
+_LOOK: dict[str, tuple[str, float]] = {}
+
+
+def _type_key(st: Style) -> str | None:
+    if st.role == Role.TITLE and st.heading_level:
+        return f"t{min(6, st.heading_level)}"
+    if st.role == Role.FOOTNOTE:
+        return "fn"
+    if st.role == Role.CAPTION:
+        return "cap"
+    if st.role in (Role.HEADER, Role.FOOTER, Role.PAGE_NUMBER):
+        return None
+    return "body"
+
+
+# Escala dos títulos a partir do corpo: nível 1 é o maior, níveis 4 a 6 têm o corpo.
+HEADING_SCALE = {1: 1.45, 2: 1.3, 3: 1.15, 4: 1.05, 5: 1.0, 6: 1.0}
+
+
+def _block_key(b: Block) -> str | None:
+    if b.role == Role.TITLE and b.heading_level:
+        return f"t{min(6, b.heading_level)}"
+    if b.role == Role.FOOTNOTE:
+        return "fn"
+    if b.role == Role.CAPTION:
+        return "cap"
+    if b.role in (Role.HEADER, Role.FOOTER, Role.PAGE_NUMBER):
+        return None
+    return "body"
+
+
+def _look(st: Style | None, key: str | None = None) -> tuple[str, float]:
+    """Família e tamanho do tipo de parte (``key``, ou o tipo do próprio
+    estilo). Escolhas explícitas do usuário na revisão continuam valendo."""
+    if st is None:
+        return "Georgia", 11.0
+    fam, size = _usable_family(st), st.size
+    key = key or _type_key(st)
+    if key in _LOOK:
+        if not st.family_override:
+            fam = _LOOK[key][0]
+        if not st.size_override:
+            size = _LOOK[key][1]
+    return fam, size
+
+
+def _compute_look(all_blocks: list[Block], styles: dict[str, Style], body: Style | None) -> None:
+    _LOOK.clear()
+
+    def dom(pred) -> Style | None:
+        return _dominant([b for b in all_blocks if pred(b)], styles)
+
+    base = body or dom(lambda b: b.role in FLOW_ROLES and not b.box_id)
+    if base:
+        _LOOK["body"] = (_usable_family(base), base.size)
+    titles = dom(lambda b: b.role == Role.TITLE and b.heading_level)
+    if titles and "body" in _LOOK:
+        for lvl in range(1, 7):
+            _LOOK[f"t{lvl}"] = (_usable_family(titles), round(_LOOK["body"][1] * HEADING_SCALE[lvl] * 2) / 2)
+    for key, role in (("fn", Role.FOOTNOTE), ("cap", Role.CAPTION)):
+        st = dom(lambda b, r=role: b.role == r)
+        if st:
+            _LOOK[key] = (_usable_family(st), st.size)
+
+
+def _style_font(style, st: Style | None, size: float | None = None, look: tuple[str, float] | None = None) -> None:
+    fam, look_size = look or _look(st)
     style.font.name = fam
     rpr = style.element.get_or_add_rPr()
     rfonts = rpr.find(qn("w:rFonts"))
@@ -117,7 +210,7 @@ def _style_font(style, st: Style | None, size: float | None = None) -> None:
         rpr.insert(0, rfonts)
     for attr in ("w:ascii", "w:hAnsi", "w:cs", "w:eastAsia"):
         rfonts.set(qn(attr), fam)
-    style.font.size = Pt(size or (st.size if st else 11))
+    style.font.size = Pt(size or look_size)
     if st is not None:
         style.font.bold = st.bold
         style.font.italic = st.italic
@@ -151,6 +244,7 @@ def _setup_styles(doc, project: Project, pages: list[Page], geo: _Geometry) -> d
     styles = project.styles
     all_blocks = [b for p in pages for b in p.blocks]
     body = next((s for s in styles.values() if s.name == "Corpo do texto"), None)
+    _compute_look(all_blocks, styles, body)
     normal = doc.styles["Normal"]
     _style_font(normal, body)
     pf = normal.paragraph_format
@@ -173,12 +267,12 @@ def _setup_styles(doc, project: Project, pages: list[Page], geo: _Geometry) -> d
             continue
         hs = doc.styles[f"Heading {lvl}"]
         st = _dominant(bl, styles)
-        _style_font(hs, st)
+        _style_font(hs, st, look=_LOOK.get(f"t{lvl}"))
         hs.font.bold = True  # títulos, subtítulos e seções sempre em negrito
         hs.font.color.rgb = None
         hpf = hs.paragraph_format
-        hpf.space_before = Pt(max(6.0, (st.size if st else 12) * 1.2))
-        hpf.space_after = Pt(max(3.0, (st.size if st else 12) * 0.5))
+        hpf.space_before = Pt(max(6.0, _look(st)[1] * 1.2))
+        hpf.space_after = Pt(max(3.0, _look(st)[1] * 0.5))
         hpf.keep_with_next = True
         al = Counter(b.align for b in bl).most_common(1)[0][0]
         hpf.alignment = ALIGN.get(al, WD_ALIGN_PARAGRAPH.LEFT)
@@ -198,13 +292,12 @@ def _setup_styles(doc, project: Project, pages: list[Page], geo: _Geometry) -> d
         mapping[st.id] = name
     # Quadros: borda simples em volta dos parágrafos consecutivos.
     q = _get_or_add_style(doc, "Quadro")
-    qst = _dominant([b for b in all_blocks if b.box_id], styles)
-    _style_font(q, qst)
+    _style_font(q, body, look=_LOOK.get("body"))  # quadro = corpo do texto
     _add_borders(q.element.get_or_add_pPr())
     q.paragraph_format.left_indent = Pt(6)
     q.paragraph_format.right_indent = Pt(6)
     _get_or_add_style(doc, "Quote")
-    _get_or_add_style(doc, "Caption")
+    _style_font(_get_or_add_style(doc, "Caption"), None, look=_LOOK.get("cap", _LOOK.get("body")))
     # Sumário do livro: todas as entradas no mesmo formato, número da página
     # na margem direita com pontilhado.
     toc = _get_or_add_style(doc, TOC_STYLE)
@@ -221,7 +314,7 @@ def _setup_styles(doc, project: Project, pages: list[Page], geo: _Geometry) -> d
     fn = _get_or_add_style(doc, "Footnote Text")
     fst = _dominant([b for b in all_blocks if b.role == Role.FOOTNOTE], styles)
     if fst:
-        _style_font(fn, fst)
+        _style_font(fn, fst, look=_LOOK.get("fn"))
     else:
         fn.font.size = Pt(max(7.0, (body.size if body else 11) * 0.8))
     # Cabeçalho e rodapé: tabulações central e à direita na largura do texto
@@ -320,6 +413,13 @@ def url_href(u: str) -> str:
     return u if re.match(r"https?://", u) else "http://" + u
 
 
+def _marcado(r: Run, highlight: bool) -> bool:
+    """Destaque de revisão só para palavras de baixa confiança. Símbolos
+    isolados (►, ■, marcadores do livro) não são palavras: o OCR erra o
+    tipo deles, mas não há o que revisar."""
+    return highlight and r.low_conf and any(ch.isalnum() for ch in r.text)
+
+
 def _plain_run(par, part: str, r: Run, highlight: bool) -> None:
     run = par.add_run(part)
     f = run.font
@@ -333,7 +433,7 @@ def _plain_run(par, part: str, r: Run, highlight: bool) -> None:
         f.superscript = True
     if r.subscript:
         f.subscript = True
-    if r.low_conf and highlight:
+    if _marcado(r, highlight):
         f.highlight_color = WD_COLOR_INDEX.YELLOW
 
 
@@ -406,7 +506,7 @@ def _footnotes_xml(notes: _Notes, note_texts: dict[str, list[Run]], highlight: b
                 props.append('<w:vertAlign w:val="superscript"/>')
             if r.subscript:
                 props.append('<w:vertAlign w:val="subscript"/>')
-            if r.low_conf and highlight:
+            if _marcado(r, highlight):
                 props.append('<w:highlight w:val="yellow"/>')
             rpr = f"<w:rPr>{''.join(props)}</w:rPr>" if props else ""
             for part in re.split(r"(\t|\n)", r.text):
@@ -614,6 +714,7 @@ def write(project: Project, store, out_path: str) -> DocxResult:
     section_start_pages: list[tuple[object, int]] = [(sec, 0)]
     figures_dir = Path(store.figures_dir) if store is not None else None
     after_cover = False
+    cur_citation = False
     breaks = _scan_breaks(pages)
     for pi, p in enumerate(pages):
         sig = heads[pi].signature() + "||" + foots[pi].signature()
@@ -640,6 +741,8 @@ def write(project: Project, store, out_path: str) -> DocxResult:
                 elif "juntar_sem_espaco" not in b.flags:
                     cur_par.add_run(" ")
                 _add_runs(cur_par, b.runs, notes, note_texts, highlight)
+                if cur_citation:
+                    _set_size(cur_par, CITATION_PT)
                 if b.align == "justify":
                     cur_par.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
                 first_on_page = False
@@ -655,6 +758,8 @@ def write(project: Project, store, out_path: str) -> DocxResult:
                 _add_runs(par, b.runs, notes, note_texts, highlight)
                 _direct_font(par, b, project, mapping)
                 res.paragraphs += 1
+                if _is_citation(b):
+                    _set_size(par, CITATION_PT)
             if par is not None and ((first_on_page and cur_par_page_break) or after_cover or b.id in breaks):
                 par.paragraph_format.page_break_before = True
                 after_cover = False
@@ -662,6 +767,7 @@ def write(project: Project, store, out_path: str) -> DocxResult:
                 after_cover = True  # a capa fica sozinha na primeira página
             first_on_page = False
             cur_par = par if b.role in FLOW_ROLES else None
+            cur_citation = b.role in FLOW_ROLES and _is_citation(b)
             if b.role in FLOW_ROLES:
                 last_flow_par = par
         # Notas da página sem chamada encontrada: referência no fim do último parágrafo.
@@ -774,9 +880,11 @@ def _format_paragraph(par, b: Block, mapping: dict[str, str], geo: _Geometry, gr
     if b.role in FLOW_ROLES or b.role == Role.CAPTION:
         if abs(b.indent_first) > 2:
             pf.first_line_indent = Pt(round(geo.pt(b.indent_first), 1))
-        if b.indent_left > 6 and not group:
+        # Recuo grande demais é outra coluna da foto (um quadro ao lado do
+        # texto): o bloco segue no fluxo da página, sem recuo.
+        if 6 < b.indent_left and not group and geo.pt(b.indent_left) < geo.text_width * 0.3:
             pf.left_indent = Pt(round(geo.pt(b.indent_left), 1))
-        if b.indent_right > geo.ppp * 12 and not group:
+        if b.indent_right > geo.ppp * 12 and not group and geo.pt(b.indent_right) < geo.text_width * 0.3:
             pf.right_indent = Pt(round(geo.pt(b.indent_right), 1))
         extra = b.space_before - geo.normal_gap
         if extra > geo.ppp * 4:
@@ -793,7 +901,7 @@ def _direct_font(par, b: Block, project: Project, mapping: dict[str, str]) -> No
     word_style = par.style.name if par.style is not None else ""
     if mapping.get(st.id) == word_style:
         return
-    fam = _usable_family(st)
+    fam, look_size = _look(st, _block_key(b))
     for r in par.runs:
         r.font.name = fam
         rpr = r._r.get_or_add_rPr()
@@ -804,7 +912,7 @@ def _direct_font(par, b: Block, project: Project, mapping: dict[str, str]) -> No
         for attr in ("w:ascii", "w:hAnsi", "w:cs", "w:eastAsia"):
             rf.set(qn(attr), fam)
         if not r.font.superscript and not r.font.subscript:
-            r.font.size = Pt(st.size)
+            r.font.size = Pt(look_size)
 
 
 def _add_figure(container, b: Block, figures_dir: Path | None, geo: _Geometry, res: DocxResult):

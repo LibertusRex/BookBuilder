@@ -196,9 +196,9 @@ def test_acertos_finais_de_texto():
 
     assert fix_text("lugar ermo (inciso), I), se") == "lugar ermo (inciso I), se"
     assert fix_text("60 anos (inciso);I);") == "60 anos (inciso I);"
-    assert fix_text("(art. 140, § 1.º, I Te II)") == "(art. 140, § 1.º, I e II)"
-    assert fix_text("Art. 161, § 1.%, II") == "Art. 161, § 1.º, II"
-    assert fix_text("no art. 155,$  2.9") == "no art. 155, § 2.º"
+    assert fix_text("(art. 140, § 1.º, I Te II)") == "(art. 140, § 1º, I e II)"
+    assert fix_text("Art. 161, § 1.%, II") == "Art. 161, § 1º, II"
+    assert fix_text("no art. 155,$  2.9") == "no art. 155, § 2º"
     assert fix_text("arts. 230 e 247,I e II; item 3.3,“b”). Pena de 1,5 ano") == \
         "arts. 230 e 247, I e II; item 3.3, “b”). Pena de 1,5 ano"
     amap = accent_map(Counter({"vítima": 50, "ímpeto": 12, "muñoz": 15, "peça": 40, "binário": 30, "binario": 2}))

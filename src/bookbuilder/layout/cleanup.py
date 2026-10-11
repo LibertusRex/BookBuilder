@@ -211,7 +211,7 @@ def final_text_fixes(pages: list[Page], vocab: Counter, lex) -> None:
     * traço entre espaços (ou antes de pontuação) é sempre travessão "—",
       também onde só o Surya leu o traço (ele às vezes devolve meia-risca);
     * inciso "I" lido como "l"/"1"/"|", "(inciso), I)" → "(inciso I)";
-    * "§ 1.%" → "§ 1.º", "155,$ 2" → "155, § 2", vírgula colada;
+    * "§ 1.%" → "§ 1º", "art. 2.º" → "art. 2º", "155,$ 2" → "155, § 2", vírgula colada;
     * acento que falta numa palavra que o livro escreve acentuada
       ("vitima" → "vítima", "impeto" → "ímpeto");
     * palavra partida com maiúscula no meio da frase ("im Portante" →
@@ -246,6 +246,9 @@ def final_text_fixes(pages: list[Page], vocab: Counter, lex) -> None:
 
 # Pedaço minúsculo + pedaço com maiúscula, no meio da frase (não depois de ponto).
 SPLIT_WORD = re.compile(r"(?<![.!?…:]\s)(?<=\s)([a-zà-ÿ]{1,4}) ([A-ZÀ-Ü][a-zà-ÿ]{2,})\b")
+# Mesma ideia em minúsculas: "con creto" → "concreto". Só junta quando a forma
+# junta é palavra válida e pelo menos um pedaço não é (evita "em presa").
+SPLIT_LOWER = re.compile(r"(?<=\s)([a-zà-ÿ]{2,4}) ([a-zà-ÿ]{2,})\b(?![-–])")
 
 
 def _join_split_word(t: str, lex) -> str:
@@ -256,7 +259,24 @@ def _join_split_word(t: str, lex) -> str:
             return joined
         return m.group(0)
 
-    return SPLIT_WORD.sub(rep, t)
+    t = SPLIT_WORD.sub(rep, t)
+    # Varredura própria: se não junta, a busca recomeça na segunda palavra, que
+    # pode ser a primeira de outro par ("caso con creto").
+    out, i = [], 0
+    while True:
+        m = SPLIT_LOWER.search(t, i)
+        if not m:
+            break
+        a, b = m.group(1), m.group(2)
+        out.append(t[i:m.start()])
+        if not (lex.valid(a) and lex.valid(b)) and lex.valid(a + b):
+            out.append(a + b)
+            i = m.end()
+        else:
+            out.append(a + " ")
+            i = m.start(2)
+    out.append(t[i:])
+    return "".join(out)
 
 
 def apply_to_runs(b: Block, fn) -> None:

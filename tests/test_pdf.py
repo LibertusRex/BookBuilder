@@ -359,3 +359,86 @@ def test_entrada_de_sumario_nao_continua_na_pagina_seguinte():
     pages = [Page(source=imageio.SourceRef(path="x.pdf", frame=i), blocks=[x]) for i, x in enumerate((a, b))]
     continuations(pages, Counter(), DocReport())
     assert not b.continues_prev
+
+
+def test_st_lido_com_j_vira_stj_e_ordinal_de_turma():
+    from bookbuilder.layout import fixes
+
+    assert fixes.fix_text("STJ 5ª Turma") == "STJ 5ª Turma"
+    assert fixes.fix_text("ST) 6º Turma, AgRg") == "STJ 6ª Turma, AgRg"
+    assert fixes.fix_text("STJ 52 Turma, AgRg") == "STJ 5ª Turma, AgRg"
+    assert fixes.fix_text("Tema 2023 Turma") == "Tema 2023 Turma"
+
+
+def test_coluna_da_direita_nao_vira_recuo_do_texto():
+    from bookbuilder.export import docx_writer
+
+    assert docx_writer._percentile([10, 12, 300, 11, 9], 0.1) == 9
+    assert docx_writer._percentile([10, 12, 300, 11, 9], 0.9) == 300
+
+
+def test_erros_recorrentes_de_ocr_em_citacoes_e_frases():
+    from bookbuilder.layout.fixes import fix_text
+
+    assert fix_text("STF22 Turma. HC 203217") == "STF 2ª Turma. HC 203217"
+    assert fix_text("STJ 52a Turma, REsp") == "STJ 5ª Turma, REsp"
+    assert fix_text("mA garantia do crédito") == "A garantia do crédito"
+    assert fix_text("1 KO crime de extorsão") == "1 O crime de extorsão"
+    assert fix_text("Rel, Min, Sebastião") == "Rel. Min. Sebastião"
+    assert fix_text("RESp REsp.1.977.165/MS") == "REsp. 1.977.165/MS"
+    assert fix_text("não se contenta! com afirmações") == "não se contenta com afirmações"
+    assert fix_text("adolescente de' 12 anos") == "adolescente de 12 anos"
+    # Quando a palavra existe de verdade, não mexe.
+    assert fix_text("Ministro Min. Sebastião") == "Ministro Min. Sebastião"
+
+
+def test_palavra_partida_em_minusculas_se_a_junta_existe(lex_fixture=None):
+    from bookbuilder.layout import cleanup
+
+    class Lex:
+        validas = {"concreto", "concreta", "em", "presa", "empresa", "importante"}
+
+        def valid(self, w):
+            return w.lower() in self.validas
+
+    lex = Lex()
+    assert cleanup._join_split_word("um caso con creto e claro", lex) == "um caso concreto e claro"
+    assert cleanup._join_split_word("uma con creta", lex) == "uma concreta"
+    # Duas palavras válidas continuam separadas.
+    assert cleanup._join_split_word("uma em presa grande", lex) == "uma em presa grande"
+    # Quebra de linha com hífen ("a vio-") não é palavra partida.
+    assert cleanup._join_split_word("entre a vio-", lex) == "entre a vio-"
+
+
+def test_n_de_numero_vira_no():
+    from bookbuilder.layout.fixes import fix_text
+
+    assert fix_text("(Súmula n, 231/STJ)") == "(Súmula nº 231/STJ)"
+    assert fix_text("AgRg na MPUMP n. 6/DF") == "AgRg na MPUMP nº 6/DF"
+    # Letra "n" dentro de palavra ou fora de número fica como está.
+    assert fix_text("pena n. grave") == "pena n. grave"
+    assert fix_text("em tn. 3") == "em tn. 3"
+
+
+def test_ordinal_com_ponto_vira_ordinal_sem_ponto():
+    from bookbuilder.layout.fixes import fix_text
+
+    assert fix_text("art. 2.º da Lei") == "art. 2º da Lei"
+    assert fix_text("§ 1.º, II") == "§ 1º, II"
+    assert fix_text("1.ª Turma") == "1ª Turma"
+    # Número decimal não é ordinal.
+    assert fix_text("valor de 1.5 mil") == "valor de 1.5 mil"
+
+
+def test_ordinal_de_paragrafo_lido_como_9_e_o():
+    from bookbuilder.layout.fixes import fix_text
+
+    assert fix_text("(art. 155, § 49). Em tese") == "(art. 155, § 4º). Em tese"
+    assert fix_text("art. 45, §19, do CP") == "art. 45, § 1º, do CP"
+    assert fix_text("art. 157, § 29-A, I") == "art. 157, § 2º-A, I"
+    assert fix_text("§ 2.9 do art. 155") == "§ 2º do art. 155"
+    assert fix_text("nos §§ 19, 3º e 4º") == "nos §§ 1º, 3º e 4º"
+    assert fix_text("art. 9o, § 29, da Lei no 10.684/2003") == "art. 9º, § 2º, da Lei nº 10.684/2003"
+    # Artigo terminado em 9 é número de verdade.
+    assert fix_text("art. 59 do CP") == "art. 59 do CP"
+    assert fix_text("§ 10 do art. 4") == "§ 10 do art. 4"

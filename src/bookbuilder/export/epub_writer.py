@@ -102,7 +102,7 @@ def _runs_html(runs: list[Run], notes_map: dict[str, tuple[int, str]], mark_low:
             t = f"<em>{t}</em>"
         if r.bold:
             t = f"<strong>{t}</strong>"
-        if r.low_conf and mark_low:
+        if mark_low and r.low_conf and any(ch.isalnum() for ch in r.text):
             t = f'<span class="incerto">{t}</span>'
         out.append(t)
     return "".join(out)

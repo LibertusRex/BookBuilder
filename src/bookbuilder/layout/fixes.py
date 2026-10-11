@@ -151,14 +151,42 @@ def fix_roman_l_text(text: str) -> str:
 
 
 TEXT_FIXES = [
+    # "ST)" é "STJ" lido com o J como parêntese (não existe "ST)" em português).
+    (re.compile(r"\bST\)J\)"), "STJ)"),
+    (re.compile(r"\bST\)(?=[\s.,;:?)\]/]|$)"), "STJ"),
+    # "ST)" já tratado acima. Tribunal com ordinal grudado: "STF22 Turma" → "STF 2ª Turma".
+    (re.compile(r"\b(ST[JF])\s?([1-9])\d?[aºª°]?\s+(Turma|Seção)\b"), r"\1 \2ª \3"),
+    # "mA" não existe em português: o "A" de início de frase veio com um "m" a mais.
+    (re.compile(r"(?<![A-Za-zÀ-ÿ])mA(?=\s[a-zà-ÿ])"), "A"),
+    # Letra de ícone antes do "O" de início de frase: "1 KO crime" → "1 O crime".
+    (re.compile(r"(?<=\d )[KE](?=O\s)"), ""),
+    # Abreviaturas de citação lidas com vírgula: "Rel, Min, Sebastião" → "Rel. Min. Sebastião".
+    (re.compile(r"\b(Rel|Min),"), r"\1."),
+    # "º" lido como "9" depois de §: "§ 49", "§19", "§ 29-A" → "§ 4º", "§ 1º", "§ 2º-A".
+    (re.compile(r"(§§?)\s?([1-9])9(?=[\s,;.:)-]|$)"), r"\1 \2º"),
+    # "º" lido como "o": "art. 9o" → "art. 9º"; "Lei no 10.684" → "Lei nº 10.684".
+    (re.compile(r"\b([Aa]rt\.\s?\d{1,3})o\b"), r"\1º"),
+    (re.compile(r"\b(Lei|Decreto|Súmula|Tema|Portaria|Resolução|MP)\s+no\s+(?=\d)"), r"\1 nº "),
+    # Ordinal com ponto antes do sinal: "art. 2.º", "§ 1.º" → "art. 2º", "§ 1º".
+    (re.compile(r"(?<=\d)\.(?=[º°ª])"), ""),
+    # Número lido como "n." ou "n,": "Súmula n, 231" → "Súmula nº 231".
+    (re.compile(r"(?<![A-Za-zÀ-ÿ])n[.,]\s*(?=\d)"), "nº "),
+    # Citação duplicada: "RESp REsp.1.977" → "REsp. 1.977".
+    (re.compile(r"\bRESp\s+REsp\.?\s*(?=\d)"), "REsp. "),
+    # Ponto de exclamação no meio da frase: "contenta! com" → "contenta com".
+    (re.compile(r"(?<=[a-zà-ÿ])! (?=[a-zà-ÿ])"), " "),
+    # Apóstrofo solto antes do número: "de' 12" → "de 12".
+    (re.compile(r"(?<=[a-zà-ÿ])' (?=\d)"), " "),
+    # Ordinal de turma e seção lido como "52 Turma", "6º Turma", "32 Seção".
+    (re.compile(r"(?<![\dA-Za-zÀ-ÿ])([1-9])[º°2]?\s+(?=(?:Turma|Seção)\b)"), r"\1ª "),
     # "(inciso), I)", "(inciso);I);", "(inciso]).I)." → "(inciso I)"
     (re.compile(r"\((incisos?)[\])\.,;\s]*([IVX]+)\)"), r"(\1 \2)"),
     # "I Te II" → "I e II"
     (re.compile(r"\b([IVX]+) [Tt]e ([IVX]+)\b"), r"\1 e \2"),
     # "155,$  2." → "155, § 2."
     (re.compile(r"(\d),\s*\$\s+(?=\d)"), r"\1, § "),
-    # "§ 1.%", "§ 2.9" → "§ 1.º", "§ 2.º"
-    (re.compile(r"(§\s*\d+)\.[%9](?!\d)"), r"\1.º"),
+    # "§ 1.%", "§ 2.9" → "§ 1º", "§ 2º"
+    (re.compile(r"(§\s*\d+)\.[%9](?!\d)"), r"\1º"),
     # Vírgula colada na palavra seguinte: "247,I e II", "3.3,“b”" (números como 1,5 ficam)
     (re.compile(r"(?<=[\w)\]”»])(,)(?=[A-Za-zÀ-ÿ“«(])"), r"\1 "),
     # Espaço logo depois da aspa de abertura ou antes da de fechamento: "“ a”" → "“a”"
